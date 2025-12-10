@@ -23,7 +23,7 @@ class Forum(private val user: LoginData): AiToolSet.ToolProvider<Any?>
     data class GetPostParams(
         @JsonSchema.Description("话题ID")
         val topicId: Int,
-        @JsonSchema.Description("帖子ID（注意是id而非楼层）")
+        @JsonSchema.Description("帖子ID")
         val postIds: List<Int>,
     )
 
@@ -31,17 +31,15 @@ class Forum(private val user: LoginData): AiToolSet.ToolProvider<Any?>
     data class SendPostParams(
         @JsonSchema.Description("话题ID")
         val topicId: Int,
-        @JsonSchema.Description("帖子类别，与topic的category相同")
-        val category: Int,
         @JsonSchema.Description("回复内容")
         val content: String,
-        @JsonSchema.Description("回复至楼层，0表示不回复任何一个楼层")
+        @JsonSchema.Description("回复至的帖子的post_number，如果是作为新帖发送则传入0")
         val replyTo: Int,
     )
 
     @Serializable
     data class ToggleLikeParams(
-        @JsonSchema.Description("帖子ID，注意是id而非楼层")
+        @JsonSchema.Description("帖子ID")
         val postId: Int
     )
 
@@ -66,11 +64,9 @@ class Forum(private val user: LoginData): AiToolSet.ToolProvider<Any?>
                     sb.append("话题标题: ${topic.title}\n")
                     sb.append("话题ID: ${topic.id}\n")
                     sb.append("话题类别: ${topic.category}\n")
-                    sb.append("该话题下的帖子，格式为[楼层].ID。如果你想要读取具体的信息请进一步获取。请留意某些工具需要传入楼层，某些则需要传入ID。\n")
-                    sb.append("其中，1楼即为话题首帖（楼主开启话题时发的帖子）。\n")
-                    topic.posts.forEachIndexed { index, postId ->
-                        sb.append("[${index + 1}]. ${postId}\n")
-                    }
+                    sb.append("该话题下的帖子的id如果你想要读取`post_number`和其他具体的信息请进一步获取。请留意某些工具需要传入`post_number`，某些则需要传入ID。\n")
+                    sb.append("其中，第一个即为话题首帖（楼主开启话题时发的帖子）。\n")
+                    topic.posts.forEach { postId -> sb.append(" ${postId}\n") }
                 }
                 AiToolInfo.ToolResult(
                     content = Content(sb.toString())
@@ -101,6 +97,7 @@ class Forum(private val user: LoginData): AiToolSet.ToolProvider<Any?>
                 {
                     posts.forEach { post ->
                         sb.append("帖子ID: ${post.id}\n")
+                        sb.append("post_number: ${post.postNumber}\n")
                         sb.append("作者: ${post.username}\n")
                         sb.append("内容: ${post.cooked}\n")
                         sb.append("回复至楼层: ${post.replyTo}\n")
@@ -151,7 +148,7 @@ class Forum(private val user: LoginData): AiToolSet.ToolProvider<Any?>
         registerTool<ToggleLikeParams>(
             "toggle_like",
             null,
-            "点赞指定帖子",
+            "点赞指定帖子，注意如果“我的点赞状态”不是null，说明已经点赞过了，不要重复点赞",
         )
         {
             runCatching()

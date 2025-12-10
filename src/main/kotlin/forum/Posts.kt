@@ -42,6 +42,7 @@ data class PostData(
     val username: String,
     val cooked: String,
     val replyTo: Int,
+    val postNumber: Int,
     val myReaction: String,
 )
 
@@ -56,8 +57,9 @@ suspend fun LoginData.getPosts(topic: Int, posts: List<Int>): List<PostData> = l
         val username = json["username"]!!.jsonPrimitive.content
         val cooked = json["cooked"]!!.jsonPrimitive.content
         val replyTo = json["reply_to_post_number"]?.jsonPrimitive?.intOrNull ?: 0
-        val myReaction = (json["current_user_reaction"] as? JsonObject)?.get("reaction_value")?.jsonPrimitive?.content ?: ""
-        PostData(id, topicId, username, cooked, replyTo, myReaction)
+        val postNumber = json["post_number"]?.jsonPrimitive?.intOrNull!!
+        val myReaction = (json["current_user_reaction"] as? JsonObject)?.get("reaction_value")?.jsonPrimitive?.content ?: "null"
+        PostData(id, topicId, username, cooked, replyTo, postNumber, myReaction)
     } ?: emptyList()
 }.getOrThrow()
 

@@ -185,8 +185,6 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 sb.appendLine(content)
                 sb.appendLine()
             }
-            sb.appendLine()
-            sb.append("请在你后面的回答中添加信息来源标记，type为 `web`，path为网页url，例如: <data type=\"web\" path=\"https://example.com\" />")
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
 
@@ -213,8 +211,6 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 sb.append("<!--content-truncate-end-->")
                 sb.appendLine()
             }
-            sb.appendLine()
-            sb.append("请在你后面的回答中添加信息来源标记，type为 `web`，path为网页url，例如: <data type=\"web\" path=\"https://example.com\" />")
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
 
@@ -253,8 +249,6 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 sb.append("<!--content-truncate-end-->")
                 sb.appendLine()
             }
-            sb.appendLine()
-            sb.append("请在你后面的回答中添加信息来源标记，type为 `web`，path为网页url，例如: <data type=\"web\" path=\"https://example.com\" />")
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
     }

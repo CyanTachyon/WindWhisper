@@ -34,8 +34,9 @@ private val logger = WindWhisperLogger.getLogger()
 private suspend fun work(user: LoginData, prompt: String)
 {
     delay(1.seconds)
-    val posts = user.getUnreadPosts()
+    val posts = user.getUnreadPosts().asReversed()
     if (posts.isNotEmpty()) logger.info(posts.map { it.topicId }.toString())
+    val set = mutableSetOf<Int>()
     posts.forEach()
     {
         logger.severe("Failed to read notification ${it.notificationId}")
@@ -44,6 +45,9 @@ private suspend fun work(user: LoginData, prompt: String)
             if (success) logger.info("Marked notification ${it.notificationId} as read.")
             else error("Failed to mark notification ${it.notificationId} as read.")
         }
+
+        if (it.topicId in set) return@forEach
+        set.add(it.topicId)
 
         val prompt = prompt
             .replace($$"${self_name}", mainConfig.username)
@@ -64,8 +68,7 @@ private suspend fun work(user: LoginData, prompt: String)
                 stream = true
             )
         }.getOrElse { return@forEach }
-        val newMemory = res.messages.filter { role -> role.role is Role.ASSISTANT }.joinToString("\n\n") { msg -> msg.content.toText() }
-        println(showJson.encodeToString(res.messages))
+        val newMemory = res.messages.filter { role -> role.role is Role.ASSISTANT }.joinToString("\n\n") { msg -> msg.content.toText() }.trim()
         if (newMemory.isNotBlank())
             memory = newMemory
         logger.info("AI response for notification ${it.notificationId}:\n${newMemory}")

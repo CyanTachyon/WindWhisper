@@ -60,12 +60,13 @@ data class LoginData(
                 }
                 if (time == mainConfig.retry - 1 || res.status.value !in (listOf(401, 403, 429) + (500..599)))
                     return res
-                if (res.status.value in listOf(401, 403))
+                if (res.status.value in listOf(401, 403) && "BAD CSRF" in res.bodyAsText())
                 {
                     val newData = login()
                     cookie = newData.cookie
                     csrfToken = newData.csrfToken
                 }
+                else return res
             }.onFailure()
             {
                 if (time == mainConfig.retry - 1)
