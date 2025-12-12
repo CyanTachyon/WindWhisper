@@ -55,10 +55,8 @@ private suspend fun work(user: LoginData, prompt: String)
         .replace($$"${topic_id}", topics.toString())
         .replace($$"${self_memory}", memory)
 
-    val tools = AiToolSet(
-        WebSearch,
-        Forum(user),
-    )
+    val tools = AiToolSet(Forum(user))
+    if (aiConfig.webSearchKey.isNotEmpty()) tools.addProvider(WebSearch)
 
     val res = logger.warning("Failed to send AI request for posts $topics")
     {
