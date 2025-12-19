@@ -11,9 +11,9 @@ import kotlinx.serialization.descriptors.*
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.*
-import moe.tachyon.windwhisper.ai.chat.plugins.ContextCompressor
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolInfo
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolSet
+import moe.tachyon.windwhisper.ai.plugins.ContextCompressor
+import moe.tachyon.windwhisper.ai.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.dataJson
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid

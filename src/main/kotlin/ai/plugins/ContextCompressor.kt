@@ -1,6 +1,6 @@
 @file:Suppress("unused")
 
-package moe.tachyon.windwhisper.ai.chat.plugins
+package moe.tachyon.windwhisper.ai.plugins
 
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -10,7 +10,7 @@ import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
 import moe.tachyon.windwhisper.ai.ChatMessages.Companion.toChatMessages
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.internal.llm.BeforeLlmRequest
 import moe.tachyon.windwhisper.ai.internal.llm.utils.ResultType
 import moe.tachyon.windwhisper.ai.internal.llm.utils.RetryType
@@ -22,7 +22,7 @@ import moe.tachyon.windwhisper.ai.Content
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
 import moe.tachyon.windwhisper.ai.TokenUsage
-import moe.tachyon.windwhisper.ai.chat.plugins.ContextCompressor.Companion.MARKING_TYPE
+import moe.tachyon.windwhisper.ai.plugins.ContextCompressor.Companion.MARKING_TYPE
 import moe.tachyon.windwhisper.dataJson
 import moe.tachyon.windwhisper.showJson
 import moe.tachyon.windwhisper.utils.JsonSchema

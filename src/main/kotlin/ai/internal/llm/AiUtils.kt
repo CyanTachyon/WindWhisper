@@ -23,7 +23,7 @@ import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.TokenUsage
 import moe.tachyon.windwhisper.ai.UnknownAiResponseException
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.internal.llm.AiResult
 import moe.tachyon.windwhisper.ai.internal.llm.LlmLoopPlugin
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest

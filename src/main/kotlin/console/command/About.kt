@@ -24,13 +24,6 @@ object About: Command
 
     override suspend fun execute(sender: CommandSender, args: List<String>): Boolean
     {
-        Loader.getResource(Loader.SUB_QUIZ_LOGO)
-            ?.bufferedReader()
-            ?.lines()
-            ?.toList()
-            ?.forEach { sender.out("${SimpleAnsiColor.BLUE}${AnsiEffect.BOLD}$it") }
-        ?: WindWhisperLogger.getLogger().severe("${Loader.SUB_QUIZ_LOGO} not found")
-
         Loader.getResource(Loader.CYAN_LOGO)
             ?.bufferedReader()
             ?.lines()

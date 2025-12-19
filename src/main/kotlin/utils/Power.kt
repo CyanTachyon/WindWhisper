@@ -86,8 +86,8 @@ object Power
         val javaVersion = System.getProperty("java.specification.version")
         if (javaVersion != "17")
         {
-            logger.severe("Java version is $javaVersion, but SubQuiz requires Java 17.")
-            shutdown(1, "Java version is $javaVersion, but SubQuiz requires Java 17.")
+            logger.severe("Java version is $javaVersion, but WindWhisper requires Java 17.")
+            shutdown(1, "Java version is $javaVersion, but WindWhisper requires Java 17.")
         }
 
         val file = File(this.javaClass.protectionDomain.codeSource.location.toURI())

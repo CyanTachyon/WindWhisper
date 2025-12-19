@@ -6,11 +6,11 @@ import kotlinx.coroutines.withContext
 import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolSet
-import moe.tachyon.windwhisper.ai.chat.tools.Forum
-import moe.tachyon.windwhisper.ai.chat.tools.WebSearch
 import moe.tachyon.windwhisper.ai.internal.llm.AiResult
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest
+import moe.tachyon.windwhisper.ai.tools.AiToolSet
+import moe.tachyon.windwhisper.ai.tools.Forum
+import moe.tachyon.windwhisper.ai.tools.WebSearch
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.console.AnsiStyle
 import moe.tachyon.windwhisper.console.SimpleAnsiColor
@@ -55,7 +55,7 @@ private val logger = WindWhisperLogger.getLogger()
 private suspend fun work(user: LoginData, prompt: String)
 {
     val posts = user.getUnreadNotifications().asReversed()
-    val topics = posts.mapNotNull { it.topicId }.distinct().filter { it !in blackList }
+    val topics = posts.mapNotNull { it.topicId }.distinct()
     if (posts.isNotEmpty()) logger.info("Starting to process ${posts.size} unread notifications for topics $topics")
 
     for (it in posts) logger.severe("Failed to read notification ${it.notificationId}")
@@ -155,5 +155,5 @@ private suspend fun work(user: LoginData, prompt: String)
     }
     val newMemory = res.messages.filter { role -> role.role is Role.ASSISTANT }.joinToString("\n\n") { msg -> msg.content.toText() }.trim()
     if (newMemory.isNotBlank()) memory = newMemory
-    logger.info("successfully updated memory.")
+    logger.info("AI request for posts $topics completed successfully.")
 }

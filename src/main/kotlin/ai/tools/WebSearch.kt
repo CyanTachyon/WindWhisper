@@ -1,4 +1,4 @@
-package moe.tachyon.windwhisper.ai.chat.tools
+package moe.tachyon.windwhisper.ai.tools
 
 import io.ktor.client.*
 import io.ktor.client.call.*

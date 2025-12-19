@@ -1,4 +1,4 @@
-package moe.tachyon.windwhisper.ai.chat.tools
+package moe.tachyon.windwhisper.ai.tools
 
 import kotlinx.serialization.Serializable
 import moe.tachyon.windwhisper.ai.Content
@@ -20,7 +20,7 @@ class Forum(
     @Serializable
     data class GetTopicParams(
         @JsonSchema.Description("话题ID")
-        val topicId: Int,
+        val topicIds: List<Int>,
     )
 
     @Serializable
@@ -45,11 +45,17 @@ class Forum(
     data class ToggleLikeParams(
         @JsonSchema.Description("目标帖子所属的话题ID")
         val topicId: Int,
-        @JsonSchema.Description("目标帖子ID")
-        val postId: Int,
-        @JsonSchema.Description("要进行的具体点赞操作")
-        val action: String,
+        val actions: List<Action>,
     )
+    {
+        @Serializable
+        data class Action(
+            @JsonSchema.Description("目标帖子ID")
+            val postId: Int,
+            @JsonSchema.Description("要进行的具体点赞操作")
+            val action: String,
+        )
+    }
 
     override suspend fun <S> AiToolSet<S>.registerTools()
     {
@@ -59,23 +65,16 @@ class Forum(
             "获得一个话题的相关信息",
         )
         {
-            if (parm.topicId in blackList)
+            val sb = StringBuilder()
+            for (topicId in parm.topicIds) runCatching()
             {
-                return@registerTool AiToolInfo.ToolResult(
-                    content = Content("你被禁止访问话题ID ${parm.topicId}。"),
-                )
-            }
-            runCatching()
-            {
-                val topic = user.getTopic(parm.topicId)
-                val sb = StringBuilder()
+                val topic = user.getTopic(topicId)
+
                 if (topic == null)
-                {
-                    sb.append("话题ID ${parm.topicId} 不存在。")
-                }
+                    sb.append("- 话题ID $topicId 不存在。")
                 else
                 {
-                    sb.append("话题标题: ${topic.title}\n")
+                    sb.append("- 话题标题: ${topic.title}\n")
                     sb.append("话题ID: ${topic.id}\n")
                     sb.append("话题类型: ")
                     when (topic.archetype)
@@ -97,16 +96,16 @@ class Forum(
                         sb.append(" 无类别信息（可能是已删除的类别）\n")
                     }
                     sb.append("最高楼层（highest_post_number）: ${topic.highestPostNumber}\n")
+                    if (topic.id in blackList)
+                        sb.append("注意：你被禁止在该话题中发言和点赞等操作。但你仍然可以阅读内容。\n")
                 }
-                AiToolInfo.ToolResult(
-                    content = Content(sb.toString())
-                )
             }.getOrElse()
             {
-                AiToolInfo.ToolResult(
-                    content = Content("获取话题信息时出错: ${it.stackTraceToString()}"),
-                )
+                sb.append("- 获取话题${topicId}信息时出错: ${it.stackTraceToString()}")
             }
+            AiToolInfo.ToolResult(
+                content = Content(sb.toString())
+            )
         }
 
         registerTool<GetPostParams>(
@@ -115,12 +114,6 @@ class Forum(
             "指定楼层（post_number）获得其前、后各10楼的帖子信息，这个工具非常适合当你需要通过楼层翻阅帖子内容时使用",
         )
         {
-            if (parm.topicId in blackList)
-            {
-                return@registerTool AiToolInfo.ToolResult(
-                    content = Content("你被禁止访问话题ID ${parm.topicId}。"),
-                )
-            }
             runCatching()
             {
                 val posts = user.getPosts(parm.topicId, parm.postNumber)
@@ -198,50 +191,52 @@ class Forum(
         )
         {
             if (parm.topicId in blackList)
-            {
                 return@registerTool AiToolInfo.ToolResult(
                     content = Content("你被禁止访问话题ID ${parm.topicId}，无法进行点赞操作。"),
                 )
-            }
-            if (parm.action !in mainConfig.reactions.keys)
+
+            parm.actions.map { it.action }.filter { it !in mainConfig.reactions.keys }.takeUnless(List<String>::isEmpty)?.let()
             {
                 return@registerTool AiToolInfo.ToolResult(
-                    content = Content("无效的action: ${parm.action}。可用的action有：\n" +
+                    content = Content(
+                        "无效的action: ${it.joinToString()}。可用的action有：\n" +
                         mainConfig.reactions.toList().joinToString("\n") { "`${it.first}`: ${it.second}" }
                     ),
                 )
             }
-            runCatching()
-            {
-                user.getPosts(parm.topicId, listOf(parm.postId)).firstOrNull()?.let()
-                { post ->
-                    if (post.myReaction != null)
-                        return@registerTool AiToolInfo.ToolResult(
-                            content = Content("帖子ID ${parm.postId} 已经被你点赞过了，当前点赞状态为 `${post.myReaction}`，请不要重复点赞！"),
-                        )
-                } ?: return@registerTool AiToolInfo.ToolResult(
-                    content = Content("未能在话题ID ${parm.topicId} 中找到帖子ID ${parm.postId}，无法进行点赞操作。"),
-                )
 
-                val success = user.toggleLike(parm.postId, parm.action)
+            val sb = StringBuilder()
+
+            val posts = user.getPosts(parm.topicId, parm.actions.map { it.postId })
+            val alreadyLiked = posts.filter { it.myReaction != null }.map { it.id }
+
+            for (action in parm.actions) runCatching()
+            {
+                if (action.postId in alreadyLiked)
+                {
+                    sb.append("- 帖子ID ${action.postId} 已经被你点赞过了，不能重复点赞。\n")
+                    return@runCatching
+                }
+
+                if (posts.none { it.id == action.postId })
+                {
+                    sb.append("- 帖子ID ${action.postId} 不存在，无法进行点赞操作。\n")
+                    return@runCatching
+                }
+
+                val success = user.toggleLike(action.postId, action.action)
                 if (success)
-                {
-                    AiToolInfo.ToolResult(
-                        content = Content("成功点赞帖子ID ${parm.postId}。"),
-                    )
-                }
+                    sb.append("- 点赞帖子ID ${action.postId} 成功。\n")
                 else
-                {
-                    AiToolInfo.ToolResult(
-                        content = Content("点赞帖子ID ${parm.postId} 失败。"),
-                    )
-                }
+                    sb.append("- 点赞帖子ID ${action.postId} 失败。\n")
             }.getOrElse()
             {
-                AiToolInfo.ToolResult(
-                    content = Content("点赞帖子时出错: ${it.stackTraceToString()}"),
-                )
+                sb.append("- 点赞帖子ID ${action.postId} 时出错: ${it.stackTraceToString()}\n")
             }
+
+            AiToolInfo.ToolResult(
+                content = Content(sb.toString())
+            )
         }
     }
 }

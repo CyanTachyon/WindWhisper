@@ -32,7 +32,7 @@ import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
 import moe.tachyon.windwhisper.ai.TokenUsage
 import moe.tachyon.windwhisper.ai.UnknownAiResponseException
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.utils.JsonSchema
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory

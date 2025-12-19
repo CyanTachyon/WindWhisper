@@ -15,7 +15,7 @@ object Code: Command
     {
         if (args.isEmpty()) return false
         val id = Uuid.random().toHexString()
-        val name = "QuizTempCodeI$id"
+        val name = "WindTempCodeI$id"
         val code = "package $PACKAGE;public class $name implements java.lang.Runnable{public void run(){${args.joinToString(";")};}}"
         val dir = Files.createTempDirectory("temp-code-$id").toFile()
         try

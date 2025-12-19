@@ -1,4 +1,4 @@
-package moe.tachyon.windwhisper.ai.chat.tools
+package moe.tachyon.windwhisper.ai.tools
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.serializer
@@ -53,7 +53,6 @@ class AiToolSet<T>
             PAGE,
             IMAGE,
             MATH,
-            QUIZ,
             VIDEO
         }
     }

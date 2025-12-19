@@ -7,7 +7,7 @@ import moe.tachyon.windwhisper.ai.ChatMessage
 import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
 import moe.tachyon.windwhisper.ai.TokenUsage
-import moe.tachyon.windwhisper.ai.chat.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.internal.llm.LlmLoopPlugin.Context
 
 data object PluginScope

@@ -31,7 +31,9 @@ val dataJson = Json(contentNegotiationJson)
 /**
  * 用作api文档等展示的json序列化/反序列化
  */
+@OptIn(ExperimentalSerializationApi::class)
 val showJson = Json(contentNegotiationJson)
 {
     prettyPrint = true
+    prettyPrintIndent = "  "
 }

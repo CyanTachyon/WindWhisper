@@ -1,4 +1,4 @@
-package moe.tachyon.windwhisper.ai.chat.plugins
+package moe.tachyon.windwhisper.ai.plugins
 
 import moe.tachyon.windwhisper.ai.ChatMessage
 import moe.tachyon.windwhisper.ai.ChatMessages

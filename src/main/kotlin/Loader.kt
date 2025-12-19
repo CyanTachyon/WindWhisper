@@ -11,7 +11,6 @@ import java.io.InputStream
 object Loader
 {
     const val CYAN_LOGO = "logo/Cyan.logo.txt"
-    const val SUB_QUIZ_LOGO = "logo/SubQuiz.logo.txt"
 
     /**
      * 获取资源文件
