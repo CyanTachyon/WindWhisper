@@ -25,11 +25,18 @@ class Forum(
 
     @Serializable
     data class GetPostParams(
-        @JsonSchema.Description("话题ID")
-        val topicId: Int,
-        @JsonSchema.Description("帖子楼层(post_number)")
-        val postNumber: Int,
+        @JsonSchema.Description("要读取的帖子")
+        val posts: List<GetPostParam>,
     )
+    {
+        @Serializable
+        data class GetPostParam(
+            @JsonSchema.Description("话题ID")
+            val topicId: Int,
+            @JsonSchema.Description("帖子楼层(post_number)，将获得该楼层前后各10楼的帖子信息")
+            val postNumber: Int,
+        )
+    }
 
     @Serializable
     data class SendPostParams(
@@ -43,13 +50,13 @@ class Forum(
 
     @Serializable
     data class ToggleLikeParams(
-        @JsonSchema.Description("目标帖子所属的话题ID")
-        val topicId: Int,
         val actions: List<Action>,
     )
     {
         @Serializable
         data class Action(
+            @JsonSchema.Description("目标帖子所属的话题ID")
+            val topicId: Int,
             @JsonSchema.Description("目标帖子ID")
             val postId: Int,
             @JsonSchema.Description("要进行的具体点赞操作")
@@ -114,36 +121,38 @@ class Forum(
             "指定楼层（post_number）获得其前、后各10楼的帖子信息，这个工具非常适合当你需要通过楼层翻阅帖子内容时使用",
         )
         {
-            runCatching()
-            {
-                val posts = user.getPosts(parm.topicId, parm.postNumber)
-                val sb = StringBuilder()
-                posts.forEach { post ->
-                    sb.append("帖子ID: ${post.id}\n")
-                    sb.append("楼层（post_number）: ${post.postNumber}\n")
-                    sb.append("作者: ${post.username}\n")
-                    sb.append("回复至楼层: ${post.replyTo}\n")
-                    sb.append("我的点赞状态: ${post.myReaction}\n")
-                    sb.append("点赞统计:\n")
-                    if (post.reactions.isEmpty()) sb.append(" 无任何点赞\n")
-                    else post.reactions.forEach { (reaction, count) ->
-                        if (count > 0 && reaction in mainConfig.reactions.keys)
-                            sb.append("  `${reaction}`: ${count}\n")
+            val sb = StringBuilder()
+            parm.posts.forEach()
+            { target ->
+                runCatching()
+                {
+                    val posts = user.getPosts(target.topicId, target.postNumber)
+                    sb.append("==== 话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息 ====\n\n")
+                    posts.forEach()
+                    { post ->
+                        sb.append("帖子ID: ${post.id}\n")
+                        sb.append("楼层（post_number）: ${post.postNumber}\n")
+                        sb.append("作者: ${post.username}\n")
+                        sb.append("回复至楼层: ${post.replyTo}\n")
+                        sb.append("我的点赞状态: ${post.myReaction}\n")
+                        sb.append("点赞统计:\n")
+                        if (post.reactions.isEmpty()) sb.append(" 无任何点赞\n")
+                        else post.reactions.forEach { (reaction, count) ->
+                            if (count > 0 && reaction in mainConfig.reactions.keys)
+                                sb.append("  `${reaction}`: ${count}\n")
+                        }
+                        sb.append("<!--post-content-start-->\n")
+                        sb.append(post.cooked)
+                        sb.append("\n<!--post-content-end-->\n")
+                        sb.append("\n---\n")
                     }
-                    sb.append("<!--post-content-start-->\n")
-                    sb.append(post.cooked)
-                    sb.append("\n<!--post-content-end-->\n")
-                    sb.append("\n---\n")
+                    sb.append("\n\n")
+                }.getOrElse()
+                {
+                    sb.append("获取话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息时出错: ${it.stackTraceToString()}\n")
                 }
-                AiToolInfo.ToolResult(
-                    content = Content(sb.toString())
-                )
-            }.getOrElse()
-            {
-                AiToolInfo.ToolResult(
-                    content = Content("获取帖子信息时出错: ${it.stackTraceToString()}"),
-                )
             }
+            AiToolInfo.ToolResult(content = Content(sb.toString()))
         }
 
         registerTool<SendPostParams>(
@@ -190,11 +199,6 @@ class Forum(
             mainConfig.reactions.toList().joinToString("\n") { "`${it.first}`: ${it.second   }" },
         )
         {
-            if (parm.topicId in blackList)
-                return@registerTool AiToolInfo.ToolResult(
-                    content = Content("你被禁止访问话题ID ${parm.topicId}，无法进行点赞操作。"),
-                )
-
             parm.actions.map { it.action }.filter { it !in mainConfig.reactions.keys }.takeUnless(List<String>::isEmpty)?.let()
             {
                 return@registerTool AiToolInfo.ToolResult(
@@ -207,11 +211,17 @@ class Forum(
 
             val sb = StringBuilder()
 
-            val posts = user.getPosts(parm.topicId, parm.actions.map { it.postId })
+            val posts = parm.actions.groupBy { it.topicId }.flatMap()
+            { (topicId, actions) ->
+                user.getPosts(topicId, actions.map { it.postId })
+            }
             val alreadyLiked = posts.filter { it.myReaction != null }.map { it.id }
 
             for (action in parm.actions) runCatching()
             {
+                if (action.topicId in blackList)
+                    return@registerTool AiToolInfo.ToolResult(content = Content("你被禁止访问话题ID ${action.topicId}，无法进行点赞操作。"))
+
                 if (action.postId in alreadyLiked)
                 {
                     sb.append("- 帖子ID ${action.postId} 已经被你点赞过了，不能重复点赞。\n")

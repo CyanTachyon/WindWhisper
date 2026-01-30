@@ -2,9 +2,9 @@ val logback_version: String by project
 val jline_version: String by project
 
 plugins {
-    kotlin("jvm") version "2.3.0-RC2"
-    kotlin("plugin.serialization") version "2.3.0-RC2"
-    id("io.ktor.plugin") version "3.3.2"
+    kotlin("jvm") version "2.3.0"
+    kotlin("plugin.serialization") version "2.3.0"
+    id("io.ktor.plugin") version "3.3.3"
 }
 
 group = "moe.tachyon.windwhisper"
@@ -44,6 +44,8 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm") // json on request/response
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1") // json on request/response
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2") // 协程
+
+    implementation("org.apache.pdfbox:pdfbox:2.0.34")
 
     implementation("org.fusesource.jansi:jansi:2.4.1") // 终端颜色码
     implementation("org.jline:jline:$jline_version") // 终端打印、命令等

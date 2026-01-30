@@ -169,8 +169,8 @@ sealed class Either<out L, out R>
     }
 }
 
-fun <L, R> Either<L, R>.leftOrElse(block: (R) -> L): L = leftOrNull ?: block(right)
-fun <L, R> Either<L, R>.rightOrElse(block: (L) -> R): R = rightOrNull ?: block(left)
+inline fun <L, R> Either<L, R>.leftOrElse(block: (R) -> L): L = leftOrNull ?: block(right)
+inline fun <L, R> Either<L, R>.rightOrElse(block: (L) -> R): R = rightOrNull ?: block(left)
 
 
 @Suppress("UNCHECKED_CAST")

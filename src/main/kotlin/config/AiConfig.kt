@@ -14,6 +14,7 @@ data class AiConfig(
     val retry: Int = 3,
     val webSearchKey: List<String> = listOf("your web search key"),
     val model: LlmModel = LlmModel(),
+    val vlmModel: LlmModel? = null,
 )
 {
     @Serializable
@@ -21,7 +22,7 @@ data class AiConfig(
         val url: String = "https://api.deepseek.com/chat/completions",
         val model: String = "deepseek-reasoner",
         val maxConcurrency: Int = 50,
-        val imageable: Boolean = false,
+        val visible: Boolean = false,
         val toolable: Boolean = false,
         val supportToolCalls: Boolean = toolable,
         @YamlComment("思考预算，单位为token，null表示不设置")
@@ -78,6 +79,7 @@ data class AiConfig(
     {
         require(timeout > 0) { "timeout must be greater than 0" }
         require(retry > 0) { "retry must be greater than 0" }
+        require(vlmModel?.visible != false) { "vlmModel must has visible ability" }
     }
 }
 

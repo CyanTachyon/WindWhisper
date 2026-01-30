@@ -144,6 +144,7 @@
             padding: 0.3rem 0.8rem;
             border-radius: 4px;
             cursor: pointer;
+            min-width: max-content;
         }
         .delete-btn:hover { background: #f85149; }
 
@@ -265,12 +266,13 @@
             <span class="modal-title">黑名单管理</span>
             <button class="close-btn" id="close-blacklist-btn">&times;</button>
         </div>
-        <div class="modal-content">
+        <div class="modal-content" style="display: flex; flex-direction: column;">
             <div style="margin-bottom: 1rem; display: flex; gap: 10px;">
+                <label for="blacklist-input"></label>
                 <input type="number" id="blacklist-input" placeholder="输入 Topic ID" style="flex: 1; padding: 0.5rem; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color);">
                 <button class="btn" id="add-blacklist-btn">添加</button>
             </div>
-            <div id="blacklist-list" style="max-height: 400px; overflow-y: auto;">
+            <div id="blacklist-list" style="flex-grow: 1; overflow-y: auto;">
                 <!-- List items here -->
             </div>
         </div>

@@ -10,8 +10,10 @@ import moe.tachyon.windwhisper.ai.internal.llm.AiResult
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest
 import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.ai.tools.Forum
+import moe.tachyon.windwhisper.ai.tools.ReadImage
 import moe.tachyon.windwhisper.ai.tools.WebSearch
 import moe.tachyon.windwhisper.config.aiConfig
+import moe.tachyon.windwhisper.console.AnsiColor
 import moe.tachyon.windwhisper.console.AnsiStyle
 import moe.tachyon.windwhisper.console.SimpleAnsiColor
 import moe.tachyon.windwhisper.forum.LoginData
@@ -51,6 +53,60 @@ var blackList: Set<Int>
         file.writeText(value.joinToString("\n"))
     }
 
+class MessagePrinter(
+    val reasoningColor: AnsiColor,
+    val messageColor: AnsiColor,
+    val thinkingTagColor: AnsiColor,
+)
+{
+    private var reasoning = false
+    private val sb = StringBuilder()
+    private var lastLineIsReasoning = false
+    private fun putMessage(content: String, isReasoning: Boolean)
+    {
+        val lines = content.split("\n").filter { it.isNotBlank() }
+        if (lines.isEmpty()) return@putMessage
+        if (isReasoning && !lastLineIsReasoning)
+        {
+            logger.info(thinkingTagColor.toString() + "<thinking>" + AnsiStyle.RESET)
+            lastLineIsReasoning = true
+        }
+        else if (!isReasoning && lastLineIsReasoning)
+        {
+            logger.info(thinkingTagColor.toString() + "</thinking>" + AnsiStyle.RESET)
+            lastLineIsReasoning = false
+        }
+        lines.forEach { line -> logger.info(
+            (if (isReasoning) reasoningColor else messageColor).toString() +
+            line +
+            AnsiStyle.RESET
+        ) }
+    }
+
+    fun put(content: String, isReasoning: Boolean)
+    {
+        if (content.isEmpty()) return
+        if (isReasoning != reasoning)
+        {
+            flush()
+            reasoning = isReasoning
+        }
+        sb.append(content)
+        if (sb.contains("\n"))
+        {
+            putMessage(sb.toString().substringBeforeLast("\n"), reasoning)
+            val after = sb.toString().substringAfterLast("\n")
+            sb.clear()
+            sb.append(after)
+        }
+    }
+    fun flush()
+    {
+        putMessage(sb.toString(), reasoning)
+        sb.clear()
+    }
+}
+
 private val logger = WindWhisperLogger.getLogger()
 private suspend fun work(user: LoginData, prompt: String)
 {
@@ -72,30 +128,21 @@ private suspend fun work(user: LoginData, prompt: String)
         .replace($$"${topic_id}", topics.toString())
         .replace($$"${self_memory}", memory)
 
-    val tools = AiToolSet(Forum(user, blackList))
+    val tools = AiToolSet(
+        Forum(user, blackList),
+        ReadImage(vlm = aiConfig.vlmModel)
+    )
     if (aiConfig.webSearchKey.isNotEmpty()) tools.addProvider(WebSearch)
 
     val res = logger.warning("Failed to send AI request for posts $topics")
     {
-        var lastLineIsReasoning = false
-        val putMessage: (String, Boolean) -> Unit = putMessage@{ content, isReasoning ->
-            val lines = content.split("\n").filter { it.isNotBlank() }
-            if (lines.isEmpty()) return@putMessage
-            if (isReasoning && !lastLineIsReasoning)
-            {
-                logger.info(SimpleAnsiColor.GREEN.toString() + "<thinking>" + AnsiStyle.RESET)
-                lastLineIsReasoning = true
-            }
-            else if (!isReasoning && lastLineIsReasoning)
-            {
-                logger.info(SimpleAnsiColor.GREEN.toString() + "</thinking>" + AnsiStyle.RESET)
-                lastLineIsReasoning = false
-            }
-            lines.forEach { line -> logger.info(SimpleAnsiColor.CYAN.toString() + line + AnsiStyle.RESET) }
-        }
+        val defaultPrinter = MessagePrinter(
+            reasoningColor = SimpleAnsiColor.CYAN,
+            messageColor = SimpleAnsiColor.CYAN,
+            thinkingTagColor = SimpleAnsiColor.GREEN,
+        )
+        var toolPrinter: MessagePrinter? = null
 
-        val sb = StringBuilder()
-        var reasoning = false
         sendAiRequest(
             model = aiConfig.model,
             messages = ChatMessages(Role.USER, prompt),
@@ -105,45 +152,32 @@ private suspend fun work(user: LoginData, prompt: String)
         {
             if (it is StreamAiResponseSlice.Message)
             {
-                if (it.reasoningContent.isNotEmpty())
-                {
-                    if (!reasoning)
-                    {
-                        putMessage(sb.toString(), false)
-                        sb.clear()
-                        reasoning = true
-                    }
-                    sb.append(it.reasoningContent)
-                }
-                else if (it.content.isNotEmpty())
-                {
-                    if (reasoning)
-                    {
-                        putMessage(sb.toString(), true)
-                        sb.clear()
-                        reasoning = false
-                    }
-                    sb.append(it.content)
-                }
-                if (sb.contains("\n"))
-                {
-                    putMessage(sb.toString().substringBeforeLast("\n"), reasoning)
-                    val after = sb.toString().substringAfterLast("\n")
-                    sb.clear()
-                    sb.append(after)
-                }
+                toolPrinter?.flush()
+                toolPrinter = null
+                defaultPrinter.put(it.reasoningContent, true)
+                defaultPrinter.put(it.content, false)
             }
             else
             {
-                putMessage(sb.toString(), reasoning)
-                sb.clear()
+                defaultPrinter.flush()
+                if (it is StreamAiResponseSlice.ToolMessage)
+                {
+                    toolPrinter = toolPrinter ?: MessagePrinter(
+                        reasoningColor = SimpleAnsiColor.YELLOW,
+                        messageColor = SimpleAnsiColor.YELLOW,
+                        thinkingTagColor = SimpleAnsiColor.BLUE,
+                    )
+                    toolPrinter!!.put(it.reasoningContent.toText(), false)
+                }
+                else
+                {
+                    toolPrinter?.flush()
+                    toolPrinter = null
+                }
                 if (it is StreamAiResponseSlice.ToolCall)
                     logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${it.tool.name}>${it.parms}</tool>" + AnsiStyle.RESET)
             }
-        }.also {
-            putMessage(sb.toString(), reasoning)
-            sb.clear()
-        }
+        }.also { defaultPrinter.flush() }
     }.getOrElse { return }
     if (res !is AiResult.Success)
     {

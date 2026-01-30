@@ -13,6 +13,7 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.filterNot
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.EncodeDefault
@@ -563,14 +564,14 @@ private suspend fun sendRequest(
                     done = done || it.trim() == "[DONE]"
                     done
                 }
-                .mapNotNull()
+                .map()
                 {
                     runCatching()
                     {
                         contentNegotiationJson.decodeFromString<StreamAiResponse>(it)
                     }.onFailure { e ->
                         logger.warning("无法解析AI返回的数据流, data: $it")
-                    }.getOrNull()
+                    }.getOrThrow()
                 }
                 .collect()
                 {

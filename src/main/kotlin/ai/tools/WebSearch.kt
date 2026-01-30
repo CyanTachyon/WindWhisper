@@ -172,7 +172,6 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
             """.trimIndent(),
         )
         {
-            sendMessage("查找网页: `${parm.key.replace("\n", " ").replace("`", "")}`")
             val data = parm.key
             if (data.isBlank()) return@registerTool AiToolInfo.ToolResult(Content("error: key must not be empty"))
             val sb = StringBuilder()
@@ -180,10 +179,13 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
             for ((i, item) in res.withIndex())
             {
                 sb.appendLine("${i + 1}. [${item.title}](${item.url})")
-                sendMessage("\n${i + 1}. [${item.title}](${item.url})")
                 val content = item.content.trim().lines().joinToString(" ")
                 sb.appendLine(content)
                 sb.appendLine()
+
+                sendMessage("${i + 1}. ${item.title}: ${item.url}\n")
+                sendMessage(content)
+                sendMessage("\n\n")
             }
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
@@ -210,6 +212,10 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 sb.appendLine(content)
                 sb.append("<!--content-truncate-end-->")
                 sb.appendLine()
+            }
+            res.firstOrNull()?.rawContent?.let()
+            {
+                sendMessage(it)
             }
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
@@ -248,6 +254,13 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 sb.appendLine(content)
                 sb.append("<!--content-truncate-end-->")
                 sb.appendLine()
+            }
+
+            for ((i, item) in res.filterNot { it.rawContent == null }.withIndex())
+            {
+                sendMessage("${i + 1}. ${item.url}\n")
+                sendMessage(item.rawContent!!)
+                sendMessage("\n\n")
             }
             AiToolInfo.ToolResult(Content(sb.toString()))
         }
