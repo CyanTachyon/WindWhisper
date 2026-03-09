@@ -130,6 +130,12 @@ class Forum(
                     sb.append("==== 话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息 ====\n\n")
                     posts.forEach()
                     { post ->
+                        if ("!ww" !in post.cooked && "！ww" !in post.cooked.lowercase())
+                        {
+                            sb.append("<!-- 你无权查看该楼层，楼层编号（post_number）为${post.postNumber} -->")
+                            sb.append("\n\n")
+                        }
+
                         sb.append("帖子ID: ${post.id}\n")
                         sb.append("楼层（post_number）: ${post.postNumber}\n")
                         sb.append("作者: ${post.username}\n")

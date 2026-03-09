@@ -46,11 +46,7 @@ import kotlin.uuid.Uuid
 @Serializable
 private sealed interface AiResponse
 {
-    val id: String
-    val `object`: String
-    val model: String
     val usage: TokenUsage?
-    val created: Long
     val choices: List<Choice>
 
     @Serializable
@@ -109,11 +105,7 @@ private sealed interface AiResponse
 
 @Serializable
 private data class DefaultAiResponse(
-    override val id: String,
     override val choices: List<Choice>,
-    override val created: Long,
-    override val model: String,
-    override val `object`: String,
     override val usage: TokenUsage?,
 ): AiResponse
 {
@@ -138,10 +130,6 @@ private data class DefaultAiResponse(
 
 @Serializable
 private data class StreamAiResponse(
-    override val id: String,
-    override val `object`: String,
-    override val created: Long,
-    override val model: String,
     override val choices: List<Choice> = emptyList(),
     override val usage: TokenUsage? = null,
 ): AiResponse
@@ -162,12 +150,14 @@ private data class StreamAiResponse(
             val reasoningContent0: String? = null,
             @SerialName("reasoning")
             val reasoningContent1: String? = null,
+            @SerialName("reasoning_text")
+            val reasoningContent2: String? = null,
             @SerialName("tool_calls")
             override val toolCalls: List<AiResponse.Choice.Message.ToolCall> = emptyList(),
         ): AiResponse.Choice.Message
         {
             override val reasoningContent: String?
-                get() = reasoningContent0 ?: reasoningContent1
+                get() = reasoningContent0 ?: reasoningContent1 ?: reasoningContent2
         }
     }
 }
@@ -587,13 +577,17 @@ private suspend fun sendRequest(
                             {
                                 logger.warning("出现错误: 工具调用ID丢失，无法将工具调用名称与参数对应。 id: ${tool.id}, lstIndex: $lstIndex waitingTools: $waitingTools")
                             }
-                            else
+                            else if (tool.function.name.isNullOrEmpty())
                             {
                                 val (name, args) = waitingTools[index] ?: ("" to "")
-                                val newName = name + (tool.function.name ?: "")
                                 val newArg = args + (tool.function.arguments ?: "")
-                                waitingTools[index] = newName to newArg
+                                waitingTools[index] = name to newArg
                                 lstIndex = index
+                            }
+                            else
+                            {
+                                lstIndex = tool.index ?: (lstIndex + 1)
+                                waitingTools[lstIndex] = tool.function.name to (tool.function.arguments ?: "")
                             }
                         }
 
