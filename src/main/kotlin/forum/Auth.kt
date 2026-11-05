@@ -2,15 +2,37 @@ package moe.tachyon.windwhisper.forum
 
 import io.ktor.client.HttpClient
 import io.ktor.client.call.*
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import moe.tachyon.windwhisper.mainConfig
+import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.utils.httpClient
+import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
+import java.util.concurrent.TimeUnit
+
+// A lost response cannot tell us whether the forum accepted a write. Disable the HTTP
+// engine's own replay as well as application retries for these non-idempotent requests.
+private val forumWriteClient: HttpClient by lazy {
+    HttpClient(ktorClientEngineFactory) {
+        engine {
+            dispatcher = Dispatchers.IO
+            config {
+                callTimeout(10_000, TimeUnit.MILLISECONDS)
+                retryOnConnectionFailure(false)
+            }
+        }
+        install(ContentNegotiation) { json(contentNegotiationJson) }
+    }
+}
 
 @Serializable
 data class LoginData(
@@ -18,17 +40,18 @@ data class LoginData(
     var csrfToken: String,
 )
 {
-    suspend fun get(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, HttpClient::get)
-    suspend fun post(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, HttpClient::post)
-    suspend fun put(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, HttpClient::put)
+    suspend fun get(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, true, HttpClient::get)
+    suspend fun post(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, false, HttpClient::post)
+    suspend fun put(url: String, block: HttpRequestBuilder.() -> Unit = {}): HttpResponse = sendRequest(url, block, false, HttpClient::put)
 
-    private suspend fun sendRequest(url: String, block: HttpRequestBuilder.() -> Unit, method: suspend HttpClient.(String, HttpRequestBuilder.() -> Unit) -> HttpResponse): HttpResponse
+    private suspend fun sendRequest(url: String, block: HttpRequestBuilder.() -> Unit, readOnly: Boolean, method: suspend HttpClient.(String, HttpRequestBuilder.() -> Unit) -> HttpResponse): HttpResponse
     {
         repeat(mainConfig.retry)
         { time ->
-            runCatching()
+            try
             {
-                val res = httpClient.method(url)
+                val client = if (readOnly) httpClient else forumWriteClient
+                val res = client.method(url)
                 {
                     header("Cookie", cookie)
                     header("X-Csrf-Token", csrfToken)
@@ -49,7 +72,10 @@ data class LoginData(
                 {
                     // 合并新旧 Cookie
                     val newCookies = res.setCookie().map { renderCookieHeader(it) }
-                    val oldCookies = cookie.split("; ").associate { val (k, v) = it.split("=", limit = 2); k to v }
+                    val oldCookies = cookie.split("; ").mapNotNull {
+                        val parts = it.split("=", limit = 2)
+                        if (parts.size == 2) parts[0] to parts[1] else null
+                    }.toMap()
                     val mergedCookies = oldCookies.toMutableMap()
                     for (newCookie in newCookies)
                     {
@@ -67,10 +93,11 @@ data class LoginData(
                     csrfToken = newData.csrfToken
                 }
                 else return res
-            }.onFailure()
+            }
+            catch (error: Throwable)
             {
-                if (time == mainConfig.retry - 1)
-                    throw it
+                if (error is CancellationException || !readOnly || time == mainConfig.retry - 1)
+                    throw error
             }
         }
         error("Unreachable")

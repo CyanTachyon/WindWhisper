@@ -1,18 +1,22 @@
 package moe.tachyon.windwhisper.ai.tools
 
 import kotlinx.serialization.Serializable
+import kotlinx.coroutines.CancellationException
 import moe.tachyon.windwhisper.ai.Content
+import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.forum.LoginData
 import moe.tachyon.windwhisper.forum.getPosts
 import moe.tachyon.windwhisper.forum.getTopic
 import moe.tachyon.windwhisper.forum.sendPosts
 import moe.tachyon.windwhisper.forum.toggleLike
+import moe.tachyon.windwhisper.forum.uploadGeneratedImage
 import moe.tachyon.windwhisper.mainConfig
 import moe.tachyon.windwhisper.utils.JsonSchema
 
 class Forum(
     private val user: LoginData,
     private val blackList: Set<Int>,
+    private val images: GeneratedImageStore? = null,
 ): AiToolSet.ToolProvider<Any?>
 {
     override val name: String = "Forum"
@@ -49,6 +53,14 @@ class Forum(
     )
 
     @Serializable
+    data class UploadGeneratedImageParams(
+        @JsonSchema.Description("系统提供的生成图片 ID，只能引用已生成并保存的图片")
+        val imageId: String,
+        @JsonSchema.Description("准备发布图片的话题 ID，上传本身不会发送帖子")
+        val topicId: Int,
+    )
+
+    @Serializable
     data class ToggleLikeParams(
         val actions: List<Action>,
     )
@@ -66,6 +78,27 @@ class Forum(
 
     override suspend fun <S> AiToolSet<S>.registerTools()
     {
+        if (images != null) registerTool<UploadGeneratedImageParams>(
+            "upload_generated_image",
+            "上传生成图片",
+            "将系统提供的生成图片 ID 上传到论坛，返回可直接放入 send_post.content 的图片 Markdown。上传不会发送帖子。",
+        )
+        {
+            if (parm.topicId in blackList)
+                return@registerTool AiToolInfo.ToolResult(Content("你被禁止访问话题ID ${parm.topicId}，无法上传图片。"))
+            try
+            {
+                require(parm.topicId > 0 && user.getTopic(parm.topicId) != null) { "目标话题不存在" }
+                val markdown = user.uploadGeneratedImage(images.read(parm.imageId))
+                AiToolInfo.ToolResult(Content("图片已上传，可在话题ID ${parm.topicId} 的 send_post.content 中使用以下 Markdown：\n$markdown"))
+            }
+            catch (error: Throwable)
+            {
+                if (error is CancellationException) throw error
+                AiToolInfo.ToolResult(Content("上传生成图片失败：${error.message ?: "未知错误"}"))
+            }
+        }
+
         registerTool<GetTopicParams>(
             "get_topic",
             null,
