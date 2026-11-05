@@ -88,12 +88,15 @@ model:
   compactThreshold: 100000
   webSearch: true
   imageGeneration: true
+  imageGenerationModel: gpt-image-2.6-sunburst
   customRequestParms:
     reasoning:
       effort: low
 ```
 
 `url` must be the complete Responses endpoint. `compactThreshold` is the token threshold for server-side automatic compaction; it must be at least 1000 and should leave room below the model's context limit. `webSearch` and `imageGeneration` control the hosted tools. `visible` controls whether the bot exposes its image/PDF reading tool. The conversation consistently uses the first entry in `key`; it does not randomly switch credentials between turns.
+
+`imageGenerationModel` selects the hosted image model independently of the conversation model. The default is `gpt-image-2.6-sunburst`, which supports the `complexity` parameter used by current conversation models; relying on the API default can select an older image model that rejects this parameter.
 
 `customRequestParms` accepts native Responses options such as `reasoning.effort` and `max_output_tokens`. The application owns input, continuation, storage, and compaction settings. Use the dedicated configuration fields for hosted search and image generation. Hosted-search citations appear as Markdown links; answer text is displayed after completion so those links can be included.
 
@@ -136,6 +139,17 @@ Run the following command again to start WindWhisper:
 java -jar WindWhisper.jar
 ```
 The program should connect to the forum and start working. You can see log output in the console.
+
+### Console commands
+
+```text
+send Please check the latest replies in topic 9950
+context
+```
+
+`send <message>` appends a user message to the current Responses conversation with the same tools and persona used for notifications. The command returns immediately. Messages wait for the current task to finish and results appear in the logs. The queue holds up to 32 messages; messages that have not started are not retained across restarts, while started turns use the existing checkpoint recovery. Sending a console message does not acknowledge forum notifications.
+
+`context` shows the model, pending turn, queued messages, continuation response, and automatic compaction threshold. It uses the Responses input-token-count endpoint to measure the saved context, including instructions, tool definitions, and pending input, without generating an answer or executing tools. While the model is working, the count excludes output still being generated. The compaction threshold is not the model's maximum context window. Both commands are also available through the existing web console.
 
 ### Notes
 

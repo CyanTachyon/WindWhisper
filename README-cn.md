@@ -88,12 +88,15 @@ model:
   compactThreshold: 100000
   webSearch: true
   imageGeneration: true
+  imageGenerationModel: gpt-image-2.6-sunburst
   customRequestParms:
     reasoning:
       effort: low
 ```
 
 `url`必须填写完整的Responses接口地址。`compactThreshold`是服务端自动压缩的token阈值，至少为1000，并应与模型上下文上限留出余量。`webSearch`和`imageGeneration`控制内置工具；`visible`控制是否向模型提供图片/PDF阅读工具。持续会话固定使用`key`列表中的第一个密钥，不会在各轮请求间随机切换。
+
+`imageGenerationModel`单独指定内置图片工具的模型，默认使用`gpt-image-2.6-sunburst`，支持当前主模型传入的`complexity`参数；依赖API默认值可能选中不支持该参数的旧图片模型。
 
 `customRequestParms`接受`reasoning.effort`、`max_output_tokens`等Responses原生选项。输入、会话续接、存储与压缩参数由程序管理；内置搜索和图片生成使用专用配置字段。内置搜索引用显示为Markdown链接；回答正文在响应完成后显示，以便包含引用。
 
@@ -136,6 +139,17 @@ OpenAI默认保留响应对象30天，因此长期空闲后`previous_response_id
 java -jar WindWhisper.jar
 ```
 程序应当会连接论坛并开始工作。你可以在控制台看到日志输出。
+
+### 控制台命令
+
+```text
+send 请查看话题9950的最新回复
+context
+```
+
+`send <消息>`将消息作为一条user消息送入当前Responses会话，使用与通知相同的工具和人格提示词。命令立即返回；若模型正在工作，消息会排队等待当前任务结束，处理结果显示在日志中。队列最多容纳32条消息；尚未开始的排队消息不会跨重启保留，已开始的轮次使用现有检查点恢复。发送命令本身不会标读论坛通知。
+
+`context`显示当前模型、待处理轮次、排队消息、续接响应和自动压缩阈值，并调用Responses输入token计数接口查询当前已保存上下文的实际大小，包括提示词、工具定义和待发送内容。查询不会生成回答或执行工具。模型正在工作时，计数不包含仍在生成的输出；自动压缩阈值不等同于模型最大窗口。两个命令也可以通过现有Web控制台使用。
 
 ### 注意事项
 
