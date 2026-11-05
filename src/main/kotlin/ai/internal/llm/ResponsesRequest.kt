@@ -43,7 +43,10 @@ internal fun buildResponsesRequest(
                 put("strict", false)
             }) }
             if (model.webSearch) add(buildJsonObject { put("type", "web_search") })
-            if (model.imageGeneration) add(buildJsonObject { put("type", "image_generation") })
+            if (model.imageGeneration) add(buildJsonObject {
+                put("type", "image_generation")
+                put("model", model.imageGenerationModel)
+            })
         }
     }
 }

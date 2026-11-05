@@ -142,6 +142,7 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
     private data class Part(val outputIndex: Int, val contentIndex: Int, val reasoning: Boolean)
 
     private val receivedParts = mutableMapOf<Part, StringBuilder>()
+    private val completedImages = mutableMapOf<Int, JsonObject>()
     private val text = StringBuilder()
     private val reasoning = StringBuilder()
     private var terminal: RequestResult? = null
@@ -153,6 +154,15 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
         if (terminal != null) return
         when (val type = event.string("type"))
         {
+            "response.output_item.done" ->
+            {
+                val item = event["item"] as? JsonObject
+                val outputIndex = event.int("output_index")
+                if (outputIndex != null && outputIndex >= 0 && item?.string("type") == "image_generation_call" &&
+                    item.string("status") == "completed" && !item.string("id").isNullOrBlank() &&
+                    !item.string("result").isNullOrBlank() && (item["error"] == null || item["error"] is JsonNull))
+                    completedImages[outputIndex] = item
+            }
             "response.output_text.delta", "response.refusal.delta", "response.reasoning_summary_text.delta" ->
             {
                 val delta = event.string("delta")
@@ -179,7 +189,8 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
                     terminal = partialResult(UnknownAiResponseException(message = "Responses API 终止事件缺少 response"))
                     return
                 }
-                var result = parseResponsesResponse(response)
+                val completedResponse = if (type == "response.completed") reconcileCompletedImages(response) else response
+                var result = parseResponsesResponse(completedResponse)
                 if (type != "response.completed" && result.error == null)
                 {
                     result.error = UnknownAiResponseException(message = "Responses API 响应未成功完成: $type")
@@ -198,9 +209,29 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
             }
             "error" -> terminal = partialResult(responsesError(event))
             null -> terminal = partialResult(UnknownAiResponseException(message = "Responses API 数据流缺少事件 type"))
-            // Function arguments are dispatched only from the completed response snapshot. Other
-            // events (including item/argument deltas) can safely arrive before that snapshot.
+            // Function arguments are dispatched only from the completed response snapshot.
+            // Partial images and image lifecycle events without a full result are not final assets.
         }
+    }
+
+    private fun reconcileCompletedImages(response: JsonObject): JsonObject
+    {
+        if (response.string("status") != "completed" ||
+            (response["error"] != null && response["error"] !is JsonNull)) return response
+        val output = response["output"] as? JsonArray ?: return response
+        val reconciled = output.mapIndexed { index, element ->
+            val item = element as? JsonObject ?: return@mapIndexed element
+            val completed = completedImages[index] ?: return@mapIndexed item
+            if (item.string("type") != "image_generation_call" || item.string("id") != completed.string("id") ||
+                (item["error"] != null && item["error"] !is JsonNull)) return@mapIndexed item
+            val status = item.string("status")
+            if (status !in setOf("generating", "in_progress") &&
+                !(status == "completed" && item.string("result").isNullOrBlank())) return@mapIndexed item
+            // The completed item contains the full image, even if the terminal snapshot still
+            // carries an earlier state. Never use a preview or override an explicit failure.
+            JsonObject(item + completed)
+        }
+        return JsonObject(response + ("output" to JsonArray(reconciled)))
     }
 
     fun result(error: Throwable? = null): RequestResult
@@ -340,8 +371,13 @@ private fun urlCitations(part: JsonObject, raw: String): List<UrlCitation>
     }
 }
 
-private fun responsesError(error: JsonObject): Throwable = UnknownAiResponseException(message =
-    "Responses API 错误${error.string("code")?.let { " ($it)" }.orEmpty()}: ${error.string("message") ?: "unknown error"}")
+private fun responsesError(error: JsonObject): Throwable
+{
+    // Hosted tools can emit an SSE error envelope with the actual provider error nested inside.
+    val detail = generateSequence(error) { it["error"] as? JsonObject }.last()
+    return UnknownAiResponseException(message =
+        "Responses API 错误${detail.string("code")?.let { " ($it)" }.orEmpty()}: ${detail.string("message") ?: "unknown error"}")
+}
 
 private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.longOrNull

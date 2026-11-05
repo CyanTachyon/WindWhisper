@@ -413,6 +413,52 @@ class ResponsesResponseTest
     }
 
     @Test
+    fun `completed image item survives a stale terminal image snapshot`() = runBlocking()
+    {
+        for (status in listOf("generating", "in_progress", "completed"))
+        {
+            val state = ResponsesStreamState()
+            val complete = image("ig_done", "webp")
+            state.accept(json("""{"type":"response.output_item.done","output_index":1,"item":$complete}""")) {}
+            assertTrue(state.result().generatedImages.isEmpty())
+
+            val stale = """{"id":"ig_done","type":"image_generation_call","status":"$status","result":null}"""
+            state.accept(terminal(response("${message("Created")},$stale,${call("call_upload", "upload_generated_image")}"))) {}
+            val result = state.result()
+            assertNull(result.error, status)
+            assertEquals(listOf(GeneratedImage("ig_done", "aW1hZ2U=", "webp")), result.generatedImages)
+            assertEquals(complete, result.message.responsesOutput[1])
+            assertEquals(listOf("call_upload"), result.toolCalls.keys.toList())
+        }
+    }
+
+    @Test
+    fun `completed image events never repair mismatched items or explicit failures`() = runBlocking()
+    {
+        val stale = """{"id":"ig_expected","type":"image_generation_call","status":"generating"}"""
+        val failed = """{"id":"ig_expected","type":"image_generation_call","status":"failed"}"""
+        for ((doneIndex, doneId, finalImage, rootStatus, eventType) in listOf(
+            listOf("1", "ig_expected", stale, "completed", "response.completed"),
+            listOf("0", "ig_other", stale, "completed", "response.completed"),
+            listOf("0", "ig_expected", failed, "completed", "response.completed"),
+            listOf("0", "ig_expected", stale, "failed", "response.failed"),
+            listOf("0", "ig_expected", stale, "incomplete", "response.incomplete"),
+            listOf("0", "ig_expected", stale, "completed", "response.failed"),
+        ))
+        {
+            val state = ResponsesStreamState()
+            state.accept(json("""{"type":"response.output_item.done","output_index":$doneIndex,"item":${image(doneId)}}""")) {}
+            val final = response("$finalImage,${call("call_post", "send_post")}", rootStatus)
+            state.accept(terminal(final, eventType)) {}
+            val result = state.result()
+            assertNotNull(result.error)
+            assertTrue(result.generatedImages.isEmpty())
+            assertTrue(result.toolCalls.isEmpty())
+            assertEquals(final["output"], JsonArray(result.message.responsesOutput))
+        }
+    }
+
+    @Test
     fun `SSE terminal snapshot cannot dispatch partial failed or still generating images`() = runBlocking()
     {
         for (imageStatus in listOf("failed", "generating", "in_progress"))
@@ -490,6 +536,20 @@ class ResponsesResponseTest
         assertNotNull(result.error)
         assertTrue(result.error!!.message!!.contains("Connection lost"))
         assertEquals("Partial", result.message.content.toText())
+    }
+
+    @Test
+    fun `hosted image SSE error preserves nested provider rejection`() = runBlocking()
+    {
+        val state = ResponsesStreamState()
+        state.accept(json("""{"type":"response.image_generation_call.generating","item_id":"ig_pending","output_index":0}""")) {}
+        state.accept(json("""{"type":"error","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'high' is not supported for this image model.","param":"complexity"}}""")) {}
+        val result = state.result()
+        assertNotNull(result.error)
+        assertTrue(result.error!!.message!!.contains("invalid_value"))
+        assertTrue(result.error!!.message!!.contains("Complexity 'high' is not supported for this image model."))
+        assertTrue(result.generatedImages.isEmpty())
+        assertTrue(result.toolCalls.isEmpty())
     }
 
     @Test

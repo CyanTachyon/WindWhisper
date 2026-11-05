@@ -29,6 +29,8 @@ data class AiConfig(
         val webSearch: Boolean = true,
         @YamlComment("启用Responses内置图片生成")
         val imageGeneration: Boolean = true,
+        @YamlComment("Responses图片工具使用的模型；显式指定以支持主模型传入的complexity参数")
+        val imageGenerationModel: String = "gpt-image-2.6-sunburst",
     )
     {
         val semaphore by lazy { Semaphore(maxConcurrency) }
@@ -43,6 +45,7 @@ data class AiConfig(
             require(maxConcurrency > 0) { "maxConcurrency must be greater than 0" }
             require(key.isNotEmpty() && key.all { it.isNotBlank() }) { "Responses API keys must not be empty" }
             require(compactThreshold >= 1_000) { "compactThreshold must be at least 1000" }
+            require(imageGenerationModel.isNotBlank()) { "imageGenerationModel must not be blank" }
         }
     }
 

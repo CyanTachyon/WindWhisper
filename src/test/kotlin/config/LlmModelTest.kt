@@ -22,6 +22,7 @@ class LlmModelTest
         assertTrue(model.visible)
         assertTrue(model.webSearch)
         assertTrue(model.imageGeneration)
+        assertEquals("gpt-image-2.6-sunburst", model.imageGenerationModel)
         assertEquals(100_000, model.compactThreshold)
     }
 
@@ -35,6 +36,7 @@ class LlmModelTest
               compactThreshold: 64000
               webSearch: false
               imageGeneration: false
+              imageGenerationModel: gpt-image-2.6-flare
               customRequestParms:
                 reasoning:
                   effort: low
@@ -42,6 +44,7 @@ class LlmModelTest
         assertEquals(64_000, config.model.compactThreshold)
         assertFalse(config.model.webSearch)
         assertFalse(config.model.imageGeneration)
+        assertEquals("gpt-image-2.6-flare", config.model.imageGenerationModel)
         assertEquals(listOf("first-key", "second-key"), config.model.key)
         val decoded = yaml.decodeFromString<AiConfig>(yaml.encodeToString(config))
         assertEquals(config.model.copy(customRequestParms = null), decoded.model.copy(customRequestParms = null))
@@ -58,6 +61,7 @@ class LlmModelTest
         assertFails { AiConfig.LlmModel(key = listOf("")) }
         assertFails { AiConfig.LlmModel(key = listOf("valid", " ")) }
         assertFails { AiConfig.LlmModel(maxConcurrency = 0) }
+        assertFails { AiConfig.LlmModel(imageGenerationModel = " ") }
         for (url in listOf("https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/responses?key=secret", "file:///v1/responses"))
             assertFails { AiConfig.LlmModel(url = url) }
     }

@@ -38,6 +38,7 @@ class ResponsesRequestTest
         assertEquals(listOf("function", "web_search", "image_generation"), tools.map { it["type"]!!.jsonPrimitive.content })
         assertEquals(JsonPrimitive("read_post"), tools[0]["name"])
         assertEquals(JsonPrimitive(false), tools[0]["strict"])
+        assertEquals(JsonPrimitive("gpt-image-2.6-sunburst"), tools[2]["model"])
         assertEquals(JsonPrimitive("object"), tools[0]["parameters"]!!.jsonObject["type"])
         assertFalse("function" in tools[0])
         assertFalse(body.keys.any { it in setOf("messages", "max_tokens", "thinking_budget", "frequency_penalty", "presence_penalty", "stop", "conversation") })
@@ -56,6 +57,16 @@ class ResponsesRequestTest
             assertEquals((if (web) 1 else 0) + (if (image) 1 else 0), types.size)
             assertFalse("previous_response_id" in body)
         }
+    }
+
+    @Test
+    fun `image tool model is independently configurable`()
+    {
+        val model = AiConfig.LlmModel(model = "gpt-6.1-terra", imageGenerationModel = "gpt-image-2.6-flare")
+        val body = buildResponsesRequest(model, emptyList(), "", null, emptyList(), true)
+        assertEquals(JsonPrimitive("gpt-6.1-terra"), body["model"])
+        val image = body["tools"]!!.jsonArray.single { it.jsonObject["type"] == JsonPrimitive("image_generation") }
+        assertEquals(JsonPrimitive("gpt-image-2.6-flare"), image.jsonObject["model"])
     }
 
     @Test
