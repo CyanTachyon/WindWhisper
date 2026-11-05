@@ -2,6 +2,7 @@ package moe.tachyon.windwhisper.ai.tools
 
 import kotlinx.serialization.Serializable
 import kotlinx.coroutines.CancellationException
+import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
 import moe.tachyon.windwhisper.ai.Content
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.forum.LoginData
@@ -94,7 +95,7 @@ class Forum(
             }
             catch (error: Throwable)
             {
-                if (error is CancellationException) throw error
+                if (error is CancellationException || error is UncertainToolExecutionException) throw error
                 AiToolInfo.ToolResult(Content("上传生成图片失败：${error.message ?: "未知错误"}"))
             }
         }
@@ -141,6 +142,7 @@ class Forum(
                 }
             }.getOrElse()
             {
+                if (it is CancellationException || it is UncertainToolExecutionException) throw it
                 sb.append("- 获取话题${topicId}信息时出错: ${it.stackTraceToString()}")
             }
             AiToolInfo.ToolResult(
@@ -189,6 +191,7 @@ class Forum(
                     sb.append("\n\n")
                 }.getOrElse()
                 {
+                    if (it is CancellationException || it is UncertainToolExecutionException) throw it
                     sb.append("获取话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息时出错: ${it.stackTraceToString()}\n")
                 }
             }
@@ -224,6 +227,7 @@ class Forum(
                 }
             }.getOrElse()
             {
+                if (it is CancellationException || it is UncertainToolExecutionException) throw it
                 AiToolInfo.ToolResult(
                     content = Content("发送帖子时出错: ${it.stackTraceToString()}"),
                 )
@@ -281,6 +285,7 @@ class Forum(
                     sb.append("- 点赞帖子ID ${action.postId} 失败。\n")
             }.getOrElse()
             {
+                if (it is CancellationException || it is UncertainToolExecutionException) throw it
                 sb.append("- 点赞帖子ID ${action.postId} 时出错: ${it.stackTraceToString()}\n")
             }
 

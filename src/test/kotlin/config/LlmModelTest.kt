@@ -1,9 +1,12 @@
 package moe.tachyon.windwhisper.config
 
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import moe.tachyon.windwhisper.utils.toJsonElement
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class LlmModelTest
@@ -11,162 +14,59 @@ class LlmModelTest
     private val yaml = ConfigLoader.configSerializer
 
     @Test
-    fun legacyConfigurationDefaultsToChatCompletions()
+    fun defaultConfigurationUsesResponsesAndHostedCapabilities()
     {
-        val config = yaml.decodeFromString<AiConfig>("""
-            model:
-              url: "https://api.deepseek.com/chat/completions"
-              model: "deepseek-reasoner"
-              key: ["test-key"]
-        """.trimIndent())
-
-        assertEquals(AiConfig.ApiType.CHAT_COMPLETIONS, config.model.apiType)
-        assertEquals(AiConfig.Search.TAVILY, config.model.search)
-        assertEquals("https://api.deepseek.com/chat/completions", config.model.url)
+        val model = yaml.decodeFromString<AiConfig>("{}").model
+        assertEquals("https://api.openai.com/v1/responses", model.url)
+        assertEquals("gpt-6-astra", model.model)
+        assertTrue(model.visible)
+        assertTrue(model.webSearch)
+        assertTrue(model.imageGeneration)
+        assertEquals(100_000, model.compactThreshold)
     }
 
     @Test
-    fun responsesCanBeSelectedForBothMainAndVisionModels()
+    fun nativeCapabilitiesAndCompactionThresholdDecodeFromYaml()
     {
         val config = yaml.decodeFromString<AiConfig>("""
             model:
-              apiType: responses
               url: "https://api.openai.com/v1/responses"
-              model: "gpt-6-astra"
-              key: ["test-key"]
-              visible: true
-            vlmModel:
-              apiType: responses
-              url: "https://api.openai.com/v1/responses"
-              model: "gpt-6-astra"
-              key: ["test-key"]
-              visible: true
+              key: ["first-key", "second-key"]
+              compactThreshold: 64000
+              webSearch: false
+              imageGeneration: false
+              customRequestParms:
+                reasoning:
+                  effort: low
         """.trimIndent())
-
-        assertEquals(AiConfig.ApiType.RESPONSES, config.model.apiType)
-        assertEquals(AiConfig.ApiType.RESPONSES, config.vlmModel?.apiType)
-        assertEquals(true, config.vlmModel?.visible)
+        assertEquals(64_000, config.model.compactThreshold)
+        assertFalse(config.model.webSearch)
+        assertFalse(config.model.imageGeneration)
+        assertEquals(listOf("first-key", "second-key"), config.model.key)
+        val decoded = yaml.decodeFromString<AiConfig>(yaml.encodeToString(config))
+        assertEquals(config.model.copy(customRequestParms = null), decoded.model.copy(customRequestParms = null))
+        assertEquals(config.model.customRequestParms?.toJsonElement(), decoded.model.customRequestParms?.toJsonElement())
     }
 
     @Test
-    fun modelsCanSelectDifferentProtocols()
+    fun rejectsInvalidCompactionThresholdAndMissingCredentials()
     {
-        val config = yaml.decodeFromString<AiConfig>("""
-            model:
-              apiType: chat_completions
-            vlmModel:
-              apiType: responses
-              url: "https://api.openai.com/v1/responses"
-              visible: true
-        """.trimIndent())
-
-        assertEquals(AiConfig.ApiType.CHAT_COMPLETIONS, config.model.apiType)
-        assertEquals(AiConfig.ApiType.RESPONSES, config.vlmModel?.apiType)
+        for (threshold in listOf(-1, 0, 999))
+            assertFails { AiConfig.LlmModel(compactThreshold = threshold) }
+        assertEquals(1_000, AiConfig.LlmModel(compactThreshold = 1_000).compactThreshold)
+        assertFails { AiConfig.LlmModel(key = emptyList()) }
+        assertFails { AiConfig.LlmModel(key = listOf("")) }
+        assertFails { AiConfig.LlmModel(key = listOf("valid", " ")) }
+        assertFails { AiConfig.LlmModel(maxConcurrency = 0) }
+        for (url in listOf("https://api.openai.com/v1/chat/completions", "https://api.openai.com/v1/responses?key=secret", "file:///v1/responses"))
+            assertFails { AiConfig.LlmModel(url = url) }
     }
 
     @Test
-    fun unknownProtocolIsRejected()
+    fun serializedConfigurationContainsNoLegacyProtocolOrMemoryOptions()
     {
-        assertFails {
-            yaml.decodeFromString<AiConfig>("""
-                model:
-                  apiType: response
-            """.trimIndent())
-        }
-    }
-
-    @Test
-    fun obsoleteToolCapabilityFlagsAreIgnoredInLegacyYaml()
-    {
-        for (protocol in listOf("chat_completions", "responses"))
-        {
-            val legacy = yaml.decodeFromString<AiConfig>("""
-                model:
-                  apiType: $protocol
-                  toolable: false
-                  supportToolCalls: false
-            """.trimIndent())
-            val current = yaml.decodeFromString<AiConfig>("""
-                model:
-                  apiType: $protocol
-            """.trimIndent())
-
-            assertEquals(current, legacy)
-        }
-    }
-
-    @Test
-    fun allSearchProvidersDecodeFromYaml()
-    {
-        for ((name, expected) in mapOf(
-            "tavily" to AiConfig.Search.TAVILY,
-            "responses" to AiConfig.Search.RESPONSES,
-            "none" to AiConfig.Search.NONE,
-        ))
-        {
-            val config = yaml.decodeFromString<AiConfig>("""
-                webSearchKey: []
-                model:
-                  apiType: responses
-                  search: $name
-            """.trimIndent())
-
-            assertEquals(expected, config.model.search)
-            assertTrue(config.webSearchKey.isEmpty())
-        }
-    }
-
-    @Test
-    fun mainAndVisionModelsCanChooseDifferentSearchProviders()
-    {
-        val config = yaml.decodeFromString<AiConfig>("""
-            model:
-              apiType: chat_completions
-              search: none
-            vlmModel:
-              apiType: responses
-              search: responses
-              visible: true
-        """.trimIndent())
-
-        assertEquals(AiConfig.Search.NONE, config.model.search)
-        assertEquals(AiConfig.Search.RESPONSES, config.vlmModel?.search)
-    }
-
-    @Test
-    fun omittedSearchPreservesTavilyForResponsesModels()
-    {
-        val config = yaml.decodeFromString<AiConfig>("""
-            model:
-              apiType: responses
-        """.trimIndent())
-
-        assertEquals(AiConfig.Search.TAVILY, config.model.search)
-    }
-
-    @Test
-    fun hostedSearchRejectsChatCompletionsProtocol()
-    {
-        for (protocol in listOf("", "apiType: chat_completions"))
-        {
-            assertFails {
-                yaml.decodeFromString<AiConfig>("""
-                    model:
-                      $protocol
-                      search: responses
-                """.trimIndent())
-            }
-        }
-    }
-
-    @Test
-    fun unknownSearchProviderIsRejected()
-    {
-        assertFails {
-            yaml.decodeFromString<AiConfig>("""
-                model:
-                  search: auto
-            """.trimIndent())
-        }
+        val text = yaml.encodeToString(AiConfig())
+        for (name in listOf("apiType", "search:", "webSearchKey", "vlmModel", "thinking_budget", "toolable", "supportToolCalls"))
+            assertFalse(name in text, name)
     }
 }

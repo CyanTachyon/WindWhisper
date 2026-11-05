@@ -4,20 +4,23 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import moe.tachyon.windwhisper.ai.ChatMessages
+import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
 import moe.tachyon.windwhisper.ai.internal.llm.AiResult
+import moe.tachyon.windwhisper.ai.internal.llm.ResponsesSession
+import moe.tachyon.windwhisper.ai.internal.llm.responsesSessionScope
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest
 import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.ai.tools.Forum
 import moe.tachyon.windwhisper.ai.tools.ReadImage
-import moe.tachyon.windwhisper.ai.tools.WebSearch
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.console.AnsiColor
 import moe.tachyon.windwhisper.console.AnsiStyle
 import moe.tachyon.windwhisper.console.SimpleAnsiColor
 import moe.tachyon.windwhisper.forum.LoginData
+import moe.tachyon.windwhisper.forum.UnreadNotification
 import moe.tachyon.windwhisper.forum.getUnreadNotifications
 import moe.tachyon.windwhisper.forum.markAsRead
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
@@ -26,21 +29,21 @@ import kotlin.time.Duration.Companion.seconds
 
 suspend fun workMain(user: LoginData, prompt: String)
 {
-    logger.info("Starting work loop...")
+    val scope = currentSessionScope(aiConfig.model)
+    val session = ResponsesSession(File(dataDir, "responses-session.json"), scope)
+    val images = GeneratedImageStore(File(dataDir, "generated-images"))
+    val instructions = prompt.replace($$"${self_name}", mainConfig.username)
+    logger.info("Starting Responses notification loop...")
     while (true)
     {
         delay(5.seconds)
-        withContext(NonCancellable) { work(user, prompt) }
+        withContext(NonCancellable) { work(user, instructions, session, images, scope) }
     }
 }
 
-private val memoryFile by lazy()
-{
-    File(dataDir, "memory.md")
-}
-var memory: String
-    get() = memoryFile.takeIf { it.exists() }?.readText() ?: ""
-    private set(value) = memoryFile.writeText(value)
+private fun currentSessionScope(model: AiConfig.LlmModel): String =
+    responsesSessionScope(mainConfig.url, mainConfig.username, model.url, model.key.first())
+
 var blackList: Set<Int>
     get()
     {
@@ -109,87 +112,171 @@ class MessagePrinter(
 }
 
 private val logger = WindWhisperLogger.getLogger()
-private suspend fun work(user: LoginData, prompt: String)
+
+/** Process the API's newest-first notification list without acknowledging unfinished turns. */
+internal suspend fun processNotifications(
+    notifications: List<UnreadNotification>,
+    pendingTurnId: String?,
+    isCompleted: (String) -> Boolean,
+    process: suspend (turnId: String, notification: UnreadNotification?) -> Boolean,
+    acknowledge: suspend (notificationId: Long) -> Boolean,
+    completedUnacknowledgedTurnIds: List<String> = emptyList(),
+): Boolean
 {
-    val posts = user.getUnreadNotifications().asReversed()
-    val topics = posts.mapNotNull { it.topicId }.distinct()
-    if (posts.isNotEmpty()) logger.info("Starting to process ${posts.size} unread notifications for topics $topics")
-
-    for (it in posts) logger.severe("Failed to read notification ${it.notificationId}")
+    fun notificationId(turnId: String): Long
     {
-        val success = user.markAsRead(it.notificationId)
-        if (success) logger.info("Marked notification ${it.notificationId} as read.")
-        else error("Failed to mark notification ${it.notificationId} as read.")
+        require(turnId.startsWith("notification:")) { "Unexpected Responses notification turn: $turnId" }
+        return turnId.removePrefix("notification:").toLongOrNull()
+            ?: error("Responses turn does not identify a notification")
     }
-
-    if (topics.isEmpty()) return
-
-    val prompt = prompt
-        .replace($$"${self_name}", mainConfig.username)
-        .replace($$"${topic_id}", topics.toString())
-        .replace($$"${self_memory}", memory)
-
-    val tools = AiToolSet(
-        Forum(user, blackList),
-        ReadImage(vlm = aiConfig.vlmModel)
-    )
-    if (aiConfig.model.search == AiConfig.Search.TAVILY && aiConfig.webSearchKey.isNotEmpty())
-        tools.addProvider(WebSearch)
-
-    val res = logger.warning("Failed to send AI request for posts $topics")
+    val acknowledgedIds = mutableSetOf<Long>()
+    suspend fun acknowledgeTurn(turnId: String): Boolean
     {
-        val defaultPrinter = MessagePrinter(
-            reasoningColor = SimpleAnsiColor.CYAN,
-            messageColor = SimpleAnsiColor.CYAN,
-            thinkingTagColor = SimpleAnsiColor.GREEN,
-        )
-        var toolPrinter: MessagePrinter? = null
-
-        sendAiRequest(
-            model = aiConfig.model,
-            messages = ChatMessages(Role.USER, prompt),
-            tools = tools.getTools(null, aiConfig.model),
-            stream = true
-        )
-        {
-            if (it is StreamAiResponseSlice.Message)
-            {
-                toolPrinter?.flush()
-                toolPrinter = null
-                defaultPrinter.put(it.reasoningContent, true)
-                defaultPrinter.put(it.content, false)
-            }
-            else
-            {
-                defaultPrinter.flush()
-                if (it is StreamAiResponseSlice.ToolMessage)
-                {
-                    toolPrinter = toolPrinter ?: MessagePrinter(
-                        reasoningColor = SimpleAnsiColor.YELLOW,
-                        messageColor = SimpleAnsiColor.YELLOW,
-                        thinkingTagColor = SimpleAnsiColor.BLUE,
-                    )
-                    toolPrinter!!.put(it.reasoningContent.toText(), false)
-                }
-                else
-                {
-                    toolPrinter?.flush()
-                    toolPrinter = null
-                }
-                if (it is StreamAiResponseSlice.ToolCall)
-                    logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${it.tool.name}>${it.parms}</tool>" + AnsiStyle.RESET)
-            }
-        }.also { defaultPrinter.flush() }
-    }.getOrElse { return }
-    if (res !is AiResult.Success)
+        val id = notificationId(turnId)
+        if (id in acknowledgedIds) return true
+        if (!acknowledge(id)) return false
+        acknowledgedIds += id
+        return true
+    }
+    if (pendingTurnId != null)
     {
-        if (res is AiResult.UnknownError)
-            logger.severe("AI request for posts $topics failed: $res", res.error)
-        else
-            logger.severe("AI request for posts $topics failed: $res")
+        notificationId(pendingTurnId)
+        // The session already owns the original input, even if the notification is no longer unread.
+        if (!isCompleted(pendingTurnId) && !process(pendingTurnId, null)) return false
+        if (!acknowledgeTurn(pendingTurnId)) return false
+    }
+    // A completed turn can fall outside the forum's unread page before acknowledgement succeeds.
+    // Drain the durable acknowledgement ledger before accepting more work.
+    for (turnId in completedUnacknowledgedTurnIds)
+        if (!acknowledgeTurn(turnId)) return false
+    for (notification in notifications.asReversed().distinctBy { it.notificationId })
+    {
+        if (notification.notificationId in acknowledgedIds) continue
+        val turnId = "notification:${notification.notificationId}"
+        if (!isCompleted(turnId) && !process(turnId, notification)) return false
+        // Completion is checkpointed by the Responses loop before this acknowledgement. If it
+        // fails, the next poll retries only this operation, never the model or its forum actions.
+        if (!acknowledgeTurn(turnId)) return false
+    }
+    return true
+}
+
+internal fun notificationInput(notification: UnreadNotification): ChatMessages = ChatMessages(
+    Role.USER,
+    buildString {
+        append("收到新的论坛通知，notificationId=${notification.notificationId}。")
+        if (notification.topicId != null)
+            append("关联topicId=${notification.topicId}，请查看相关话题并决定是否回复、点赞或仅浏览。")
+        else append("这条通知没有关联topicId；没有明确话题时无需执行论坛操作。")
+    },
+)
+
+private suspend fun work(
+    user: LoginData,
+    instructions: String,
+    session: ResponsesSession,
+    images: GeneratedImageStore,
+    startupScope: String,
+)
+{
+    val model = aiConfig.model
+    if (currentSessionScope(model) != startupScope)
+    {
+        logger.severe("Forum identity or Responses endpoint/key changed. Restart with the matching session data directory before processing more notifications.")
         return
     }
-    val newMemory = res.messages.filter { role -> role.role is Role.ASSISTANT }.joinToString("\n\n") { msg -> msg.content.toText() }.trim()
-    if (newMemory.isNotBlank()) memory = newMemory
-    logger.info("AI request for posts $topics completed successfully.")
+    val notifications = user.getUnreadNotifications()
+    if (notifications.isNotEmpty()) logger.info("Processing ${notifications.size} unread notifications in the Responses conversation")
+    val tools = AiToolSet(Forum(user, blackList, images = images), ReadImage()).getTools(null, model)
+
+    logger.warning("Failed to process forum notifications") {
+        processNotifications(
+            notifications = notifications,
+            pendingTurnId = session.pendingTurnId,
+            completedUnacknowledgedTurnIds = session.completedUnacknowledgedTurnIds,
+            isCompleted = session::isCompleted,
+            process = { turnId, notification ->
+                val defaultPrinter = MessagePrinter(
+                    reasoningColor = SimpleAnsiColor.CYAN,
+                    messageColor = SimpleAnsiColor.CYAN,
+                    thinkingTagColor = SimpleAnsiColor.GREEN,
+                )
+                var toolPrinter: MessagePrinter? = null
+                val result = try
+                {
+                    sendAiRequest(
+                        model = model,
+                        messages = notification?.let(::notificationInput) ?: ChatMessages.empty(),
+                        instructions = instructions,
+                        tools = tools,
+                        session = session,
+                        turnId = turnId,
+                        stream = true,
+                        onGeneratedImage = { image ->
+                            images.save(image.id, image.base64, image.format)
+                            "图片已保存，imageId=${image.id}。如需在论坛发送，请调用upload_generated_image并传入该imageId与目标topicId，获得Markdown后放入send_post的内容。"
+                        },
+                    ) { slice ->
+                        if (slice is StreamAiResponseSlice.Message)
+                        {
+                            toolPrinter?.flush()
+                            toolPrinter = null
+                            defaultPrinter.put(slice.reasoningContent, true)
+                            defaultPrinter.put(slice.content, false)
+                        }
+                        else
+                        {
+                            defaultPrinter.flush()
+                            if (slice is StreamAiResponseSlice.ToolMessage)
+                            {
+                                toolPrinter = toolPrinter ?: MessagePrinter(
+                                    reasoningColor = SimpleAnsiColor.YELLOW,
+                                    messageColor = SimpleAnsiColor.YELLOW,
+                                    thinkingTagColor = SimpleAnsiColor.BLUE,
+                                )
+                                toolPrinter!!.put(slice.reasoningContent.toText(), false)
+                            }
+                            else
+                            {
+                                toolPrinter?.flush()
+                                toolPrinter = null
+                            }
+                            if (slice is StreamAiResponseSlice.ToolCall)
+                                logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${slice.tool.name}>${slice.parms}</tool>" + AnsiStyle.RESET)
+                        }
+                    }
+                }
+                finally
+                {
+                    toolPrinter?.flush()
+                    defaultPrinter.flush()
+                }
+                when (result)
+                {
+                    is AiResult.Success -> {
+                        logger.info("Completed $turnId in the Responses conversation")
+                        true
+                    }
+                    is AiResult.UnknownError -> {
+                        logger.severe("Responses turn $turnId failed", result.error)
+                        false
+                    }
+                    else -> {
+                        logger.severe("Responses turn $turnId failed: ${result::class.simpleName}")
+                        false
+                    }
+                }
+            },
+            acknowledge = { notificationId ->
+                user.markAsRead(notificationId).also { success ->
+                    if (success)
+                    {
+                        session.acknowledge("notification:$notificationId")
+                        logger.info("Marked notification $notificationId as read")
+                    }
+                    else logger.warning("Notification $notificationId is complete, but marking it as read failed; only acknowledgement will be retried")
+                }
+            },
+        )
+    }
 }

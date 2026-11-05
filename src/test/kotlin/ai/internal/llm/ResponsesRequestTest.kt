@@ -6,7 +6,6 @@ import kotlinx.serialization.json.*
 import moe.tachyon.windwhisper.ai.*
 import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.config.AiConfig
-import moe.tachyon.windwhisper.dataJson
 import moe.tachyon.windwhisper.initializeTestEnvironment
 import moe.tachyon.windwhisper.utils.JsonSchema
 import kotlin.reflect.typeOf
@@ -17,47 +16,77 @@ class ResponsesRequestTest
     @BeforeTest
     fun initialize() = initializeTestEnvironment()
 
-    private fun context(model: AiConfig.LlmModel = AiConfig.LlmModel(
-        apiType = AiConfig.ApiType.RESPONSES, model = "gpt-6-astra",
-    )) = LlmLoopPlugin.Context(model, ChatMessages.empty(), null, null, null, null, null, null,
-        emptyList(), mutableListOf(), {}, {})
-
     @Test
-    fun `maps request fields and native tool schemas without chat fields`()
+    fun `requests own the persistent chain instructions compaction and native tools`()
     {
-        val context = context().apply {
-            maxTokens = 2048
-            tools = listOf(AiToolInfo("lookup", "Look up a post", null,
-                { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) },
-                JsonSchema.Object(properties = mapOf("query" to JsonSchema.String(null))), typeOf<String>()))
-        }
-        val body = buildResponsesRequest(context, ChatMessages(ChatMessage(Role.SYSTEM, "Instructions"),
-            ChatMessage(Role.USER, "Question")), true)
+        val custom = Yaml.default.parseToYamlNode("reasoning: {effort: low}\nmax_output_tokens: 2048") as YamlMap
+        val model = AiConfig.LlmModel(compactThreshold = 12000, customRequestParms = custom)
+        val tool = AiToolInfo("read_post", "Read a post", null,
+            { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) }, JsonSchema.Object(), typeOf<String>())
+        val input = ChatMessages(Role.USER, "New notification").toResponsesInput()
+        val body = buildResponsesRequest(model, input, "Forum instructions", "resp_previous", listOf(tool), true)
 
-        assertEquals("gpt-6-astra", body["model"]?.jsonPrimitive?.content)
-        assertEquals(2048, body["max_output_tokens"]?.jsonPrimitive?.int)
+        assertEquals(JsonArray(input), body["input"])
+        assertEquals(JsonPrimitive("resp_previous"), body["previous_response_id"])
+        assertEquals(JsonPrimitive("Forum instructions"), body["instructions"])
+        assertEquals(JsonPrimitive(true), body["store"])
         assertEquals(JsonPrimitive(true), body["stream"])
-        assertEquals(JsonPrimitive(false), body["store"])
-        assertEquals(JsonPrimitive("reasoning.encrypted_content"), body["include"]?.jsonArray?.single())
-        assertEquals(listOf("system", "user"), body["input"]!!.jsonArray.map { it.jsonObject["role"]!!.jsonPrimitive.content })
-        assertFalse(body.keys.any { it in setOf("messages", "max_tokens", "thinking_budget", "frequency_penalty", "presence_penalty", "stop") })
-        val tool = body["tools"]!!.jsonArray.single().jsonObject
-        assertEquals(JsonPrimitive("lookup"), tool["name"])
-        assertEquals(JsonPrimitive(false), tool["strict"])
-        assertFalse("function" in tool)
-        assertEquals(JsonPrimitive("object"), tool["parameters"]!!.jsonObject["type"])
+        assertEquals(JsonPrimitive("low"), body["reasoning"]!!.jsonObject["effort"])
+        assertEquals(JsonPrimitive(2048), body["max_output_tokens"])
+        assertEquals(Json.parseToJsonElement("""[{"type":"compaction","compact_threshold":12000}]"""), body["context_management"])
+        val tools = body["tools"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("function", "web_search", "image_generation"), tools.map { it["type"]!!.jsonPrimitive.content })
+        assertEquals(JsonPrimitive("read_post"), tools[0]["name"])
+        assertEquals(JsonPrimitive(false), tools[0]["strict"])
+        assertEquals(JsonPrimitive("object"), tools[0]["parameters"]!!.jsonObject["type"])
+        assertFalse("function" in tools[0])
+        assertFalse(body.keys.any { it in setOf("messages", "max_tokens", "thinking_budget", "frequency_penalty", "presence_penalty", "stop", "conversation") })
     }
 
     @Test
-    fun `preserves images and files in user input and function output`()
+    fun `hosted tool switches are independent and first request omits previous id`()
+    {
+        for (web in listOf(false, true)) for (image in listOf(false, true))
+        {
+            val body = buildResponsesRequest(AiConfig.LlmModel(webSearch = web, imageGeneration = image),
+                emptyList(), "", null, emptyList(), false)
+            val types = body["tools"]!!.jsonArray.map { it.jsonObject["type"]!!.jsonPrimitive.content }
+            assertEquals(web, "web_search" in types)
+            assertEquals(image, "image_generation" in types)
+            assertEquals((if (web) 1 else 0) + (if (image) 1 else 0), types.size)
+            assertFalse("previous_response_id" in body)
+        }
+    }
+
+    @Test
+    fun `custom options cannot replace chain transport tools or legacy protocol fields`()
+    {
+        val forbidden = listOf("model", "input", "instructions", "stream", "store", "previous_response_id",
+            "conversation", "context_management", "tools", "background", "messages", "max_tokens",
+            "thinking_budget", "frequency_penalty", "presence_penalty", "stop")
+        for (field in forbidden)
+        {
+            val custom = Yaml.default.parseToYamlNode("$field: ignored") as YamlMap
+            assertFailsWith<IllegalArgumentException>(field) {
+                buildResponsesRequest(AiConfig.LlmModel(customRequestParms = custom), emptyList(), "", null, emptyList(), false)
+            }
+        }
+    }
+
+    @Test
+    fun `new user and tool inputs retain media while internal markers are filtered`()
     {
         val media = Content(ContentNode.text("Look"), ContentNode.image("data:image/png;base64,AA=="),
             ContentNode.file("doc.pdf", "data:application/pdf;base64,AA=="),
             ContentNode.file("remote.pdf", "https://example.com/doc.pdf"))
-        val input = ChatMessages(ChatMessage(Role.USER, media), ChatMessage(Role.TOOL("call_1", "read_image"), media)).toResponsesInput()
-        val user = input[0].jsonObject["content"]!!.jsonArray
-        assertEquals(user, input[1].jsonObject["output"])
-        assertEquals(JsonPrimitive("call_1"), input[1].jsonObject["call_id"])
+        val input = ChatMessages(ChatMessage(Role.SYSTEM, "Developer guidance"), ChatMessage(Role.USER, media),
+            ChatMessage(Role.MARKING("internal", JsonNull), "hidden"),
+            ChatMessage(Role.TOOL("call_1", "read_image"), media)).toResponsesInput()
+        assertEquals(3, input.size)
+        assertEquals(JsonPrimitive("developer"), input[0]["role"])
+        val user = input[1]["content"]!!.jsonArray
+        assertEquals(user, input[2]["output"])
+        assertEquals(JsonPrimitive("call_1"), input[2]["call_id"])
         assertEquals(listOf("input_text", "input_image", "input_file", "input_file"), user.map { it.jsonObject["type"]!!.jsonPrimitive.content })
         assertEquals(JsonPrimitive("data:image/png;base64,AA=="), user[1].jsonObject["image_url"])
         assertEquals(JsonPrimitive("data:application/pdf;base64,AA=="), user[2].jsonObject["file_data"])
@@ -66,128 +95,10 @@ class ResponsesRequestTest
     }
 
     @Test
-    fun `replays raw output once and retains it across serialization and optimization`()
+    fun `old assistant transcripts cannot be replayed into the persistent chain`()
     {
-        val output = Json.parseToJsonElement("""[
-            {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"cipher"},
-            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking","annotations":[]}]},
-            {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
-        ]""").jsonArray.map { it.jsonObject }
-        val response = ChatMessage(Role.ASSISTANT, Content("Checking"), toolCalls = listOf(ChatMessage.ToolCall("call_1", "lookup", "{}")), responsesOutput = output)
-        val restored = dataJson.decodeFromString<ChatMessage>(dataJson.encodeToString(response))
-        assertEquals(output, restored.responsesOutput)
-        val messages = (ChatMessages(ChatMessage(Role.ASSISTANT, "Older reply")) + restored) +
-            ChatMessage(Role.TOOL("call_1", "lookup"), "Found")
-        assertEquals(3, messages.size)
-        val input = messages.toResponsesInput()
-        assertEquals(output, input.subList(1, 4))
-        assertEquals(1, input.count { it.jsonObject["type"] == JsonPrimitive("function_call") })
-        val twice = (ChatMessages(response) + restored).single()
-        assertEquals(output + output, twice.responsesOutput)
-        assertEquals(JsonArray(output + output), ChatMessages(twice).toResponsesInput())
-    }
-
-    @Test
-    fun `converts legacy assistant calls and filters internal markers`()
-    {
-        val legacy = ChatMessage(Role.ASSISTANT, Content("Checking"), toolCalls = listOf(ChatMessage.ToolCall("call_1", "lookup", "{}")))
-        val input = ChatMessages(legacy, ChatMessage(Role.MARKING("internal", JsonNull), "hidden"),
-            ChatMessage(Role.TOOL("call_1", "lookup"), "Found")).toResponsesInput()
-        assertEquals(3, input.size)
-        assertEquals(JsonPrimitive("function_call"), input[1].jsonObject["type"])
-        assertEquals(JsonPrimitive("call_1"), input[1].jsonObject["call_id"])
-        assertEquals(JsonPrimitive("Found"), input[2].jsonObject["output"])
-    }
-
-    @Test
-    fun `custom native options retain encrypted reasoning include`()
-    {
-        val custom = Yaml.default.parseToYamlNode("""
-            reasoning: {effort: low}
-            include: [web_search_call.action.sources]
-            max_output_tokens: 4096
-        """.trimIndent()) as YamlMap
-        val body = buildResponsesRequest(context(context().model.copy(customRequestParms = custom)), ChatMessages(Role.USER, "Hello"), false)
-        assertEquals(JsonPrimitive("low"), body["reasoning"]!!.jsonObject["effort"])
-        assertEquals(4096, body["max_output_tokens"]?.jsonPrimitive?.int)
-        assertEquals(setOf("reasoning.encrypted_content", "web_search_call.action.sources"), body["include"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
-    }
-
-    @Test
-    fun `rejects unsupported legacy options and server managed history`()
-    {
-        assertFailsWith<IllegalArgumentException> {
-            buildResponsesRequest(context().apply { stop = listOf("END") }, ChatMessages.empty(), false)
-        }
-        assertFailsWith<IllegalArgumentException> {
-            buildResponsesRequest(context(context().model.copy(thinkingBudget = 1024)), ChatMessages.empty(), false)
-        }
-        val custom = Yaml.default.parseToYamlNode("previous_response_id: resp_old") as YamlMap
-        assertFailsWith<IllegalArgumentException> {
-            buildResponsesRequest(context(context().model.copy(customRequestParms = custom)), ChatMessages.empty(), false)
-        }
-        val streaming = Yaml.default.parseToYamlNode("stream: true") as YamlMap
-        assertFailsWith<IllegalArgumentException> {
-            buildResponsesRequest(context(context().model.copy(customRequestParms = streaming)), ChatMessages.empty(), false)
-        }
-    }
-
-    @Test
-    fun `search selection adds hosted search only for responses and preserves functions`()
-    {
-        for (search in AiConfig.Search.entries)
-        {
-            val context = context(context().model.copy(search = search)).apply {
-                tools = listOf(AiToolInfo("read_post", "Read a post", null,
-                    { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) },
-                    JsonSchema.Object(), typeOf<String>()))
-            }
-            val body = buildResponsesRequest(context, ChatMessages(Role.USER, "Find sources"), true)
-            val tools = body["tools"]!!.jsonArray.map { it.jsonObject }
-            assertEquals(1, tools.count { it["name"] == JsonPrimitive("read_post") })
-            assertEquals(if (search == AiConfig.Search.RESPONSES) 1 else 0,
-                tools.count { it["type"] == JsonPrimitive("web_search") })
-        }
-        val hostedOnly = context(context().model.copy(search = AiConfig.Search.RESPONSES))
-        val body = buildResponsesRequest(hostedOnly, ChatMessages(Role.USER, "Search"), false)
-        assertEquals(JsonPrimitive("web_search"), body["tools"]!!.jsonArray.single().jsonObject["type"])
-        val disabled = buildResponsesRequest(context(context().model.copy(search = AiConfig.Search.NONE)), ChatMessages.empty(), false)
-        assertFalse("tools" in disabled)
-    }
-
-    @Test
-    fun `custom tools cannot replace forum tools or override search selection`()
-    {
-        val custom = Yaml.default.parseToYamlNode("""
-            tools:
-              - type: web_search
-                search_context_size: low
-              - type: web_search
-              - type: file_search
-                vector_store_ids: [vs_test]
-              - type: mcp
-                server_label: first
-                server_url: https://first.example.com/mcp
-              - type: mcp
-                server_label: second
-                server_url: https://second.example.com/mcp
-        """.trimIndent()) as YamlMap
-        for (search in AiConfig.Search.entries)
-        {
-            val context = context(context().model.copy(search = search, customRequestParms = custom)).apply {
-                tools = listOf(AiToolInfo("read_post", "Read a post", null,
-                    { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) },
-                    JsonSchema.Object(), typeOf<String>()))
-            }
-            val tools = buildResponsesRequest(context, ChatMessages.empty(), false)["tools"]!!.jsonArray.map { it.jsonObject }
-            assertEquals(1, tools.count { it["name"] == JsonPrimitive("read_post") })
-            assertEquals(1, tools.count { it["type"] == JsonPrimitive("file_search") })
-            assertEquals(listOf("first", "second"), tools.filter { it["type"] == JsonPrimitive("mcp") }
-                .map { it["server_label"]!!.jsonPrimitive.content })
-            val hosted = tools.filter { it.isResponsesWebSearchTool() }
-            if (search == AiConfig.Search.RESPONSES)
-                assertEquals(JsonPrimitive("low"), hosted.single()["search_context_size"])
-            else assertTrue(hosted.isEmpty())
-        }
+        val assistant = ChatMessage(Role.ASSISTANT, Content("Old answer"), responsesOutput = listOf(
+            buildJsonObject { put("type", "reasoning"); put("encrypted_content", "old-state") }))
+        assertFailsWith<IllegalStateException> { ChatMessages(assistant).toResponsesInput() }
     }
 }

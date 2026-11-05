@@ -23,6 +23,14 @@ class ResponsesResponseTest
     private fun call(id: String, name: String = "lookup"): String =
         """{"id":"fc_$id","type":"function_call","call_id":"$id","name":"$name","arguments":"{}","status":"completed"}"""
 
+    private fun image(id: String = "ig_1", format: String? = null): JsonObject = buildJsonObject {
+        put("id", id)
+        put("type", "image_generation_call")
+        put("status", "completed")
+        put("result", "aW1hZ2U=")
+        format?.let { put("output_format", it) }
+    }
+
     private fun terminal(response: JsonObject, type: String = "response.completed"): JsonObject =
         json("""{"type":"$type","response":$response}""")
 
@@ -82,6 +90,108 @@ class ResponsesResponseTest
     }
 
     @Test
+    fun `compaction only response succeeds and retains the response id and raw item`()
+    {
+        val compaction = json("""{"type":"compaction","id":"cmp_1","encrypted_content":"compressed state"}""")
+        val response = response(compaction.toString(), extra = ",\"id\":\"resp_compacted\"")
+        val result = parseResponsesResponse(response)
+
+        assertNull(result.error)
+        assertEquals("resp_compacted", result.responseId)
+        assertEquals(listOf(compaction), result.message.responsesOutput)
+        assertTrue(result.toolCalls.isEmpty())
+        assertTrue(result.generatedImages.isEmpty())
+        assertEquals("", result.message.content.toText())
+    }
+
+    @Test
+    fun `image only responses accept supported formats and default missing format to png`()
+    {
+        for (format in listOf(null, "png", "jpeg", "webp"))
+        {
+            val item = image(format = format)
+            val response = response(item.toString(), extra = ",\"id\":\"resp_image\"")
+            val result = parseResponsesResponse(response)
+
+            assertNull(result.error, "format=$format")
+            assertEquals("resp_image", result.responseId)
+            assertEquals(listOf(GeneratedImage("ig_1", "aW1hZ2U=", format ?: "png")), result.generatedImages)
+            assertEquals(listOf(item), result.message.responsesOutput)
+            assertTrue(result.toolCalls.isEmpty())
+            assertEquals("", result.message.content.toText())
+        }
+    }
+
+    @Test
+    fun `mixed text function and image outputs preserve separate results and original ordering`()
+    {
+        val first = image("ig_first", "webp")
+        val second = image("ig_second", "jpeg")
+        val response = response("$first,${message("Created two images.")},${call("call_one")},$second",
+            extra = ",\"id\":\"resp_mixed\"")
+        val result = parseResponsesResponse(response)
+
+        assertNull(result.error)
+        assertEquals("Created two images.", result.message.content.toText())
+        assertEquals("lookup" to "{}", result.toolCalls["call_one"])
+        assertEquals(listOf(GeneratedImage("ig_first", "aW1hZ2U=", "webp"),
+            GeneratedImage("ig_second", "aW1hZ2U=", "jpeg")), result.generatedImages)
+        assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+    }
+
+    @Test
+    fun `invalid image items prevent all image and function dispatch even alongside valid output`()
+    {
+        val valid = image()
+        val invalidImages = listOf(
+            JsonObject(valid - "id"),
+            JsonObject(valid + ("id" to JsonPrimitive(" "))),
+            JsonObject(valid - "result"),
+            JsonObject(valid + ("result" to JsonPrimitive(" "))),
+            JsonObject(valid - "status"),
+            JsonObject(valid + ("status" to JsonPrimitive("in_progress"))),
+            JsonObject(valid + ("status" to JsonPrimitive("failed"))),
+            JsonObject(valid + ("output_format" to JsonPrimitive("gif"))),
+            JsonObject(valid + ("output_format" to JsonNull)),
+        )
+        for (invalid in invalidImages)
+        {
+            val response = response("${image("ig_other")},${message("Image result")},${call("call_one")},$invalid")
+            val result = parseResponsesResponse(response)
+            assertNotNull(result.error, invalid.toString())
+            assertTrue(result.generatedImages.isEmpty(), invalid.toString())
+            assertTrue(result.toolCalls.isEmpty(), invalid.toString())
+            assertTrue(result.message.toolCalls.isEmpty(), invalid.toString())
+            assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+        }
+        val duplicate = parseResponsesResponse(response("$valid,$valid"))
+        assertNotNull(duplicate.error)
+        assertTrue(duplicate.generatedImages.isEmpty())
+        val invalidCall = parseResponsesResponse(response("""$valid,{"type":"function_call","name":"lookup","arguments":"{}"}"""))
+        assertNotNull(invalidCall.error)
+        assertTrue(invalidCall.generatedImages.isEmpty())
+    }
+
+    @Test
+    fun `failed and incomplete root responses retain raw images but expose none for saving`()
+    {
+        for (status in listOf("failed", "incomplete"))
+        {
+            val response = response("${image()},${call("call_one")}", status, extra = ",\"id\":\"resp_failed\"")
+            val result = parseResponsesResponse(response)
+            assertNotNull(result.error)
+            assertEquals("resp_failed", result.responseId)
+            assertTrue(result.generatedImages.isEmpty())
+            assertTrue(result.toolCalls.isEmpty())
+            assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+        }
+        val apiError = parseResponsesResponse(response(image().toString(), extra =
+            ""","error":{"code":"server_error","message":"Image generation failed"}"""))
+        assertNotNull(apiError.error)
+        assertTrue(apiError.generatedImages.isEmpty())
+    }
+
+    @Test
     fun `refusal is displayed as text`()
     {
         val result = parseResponsesResponse(response("""{"type":"message","content":[{"type":"refusal","refusal":"Cannot help with that."}]}"""))
@@ -121,6 +231,7 @@ class ResponsesResponseTest
             response("${call("same")},${call("same")}"),
             response("""{"type":"image_generation_call","result":"base64"}"""),
             response("""{"type":"reasoning","summary":[],"encrypted_content":"cipher"}"""),
+            response("""{"type":"unknown_output","id":"unknown_1"}"""),
             json("""{"status":"completed","output":"invalid"}"""),
         )
         invalidResponses.forEach { response ->
@@ -194,6 +305,53 @@ class ResponsesResponseTest
     }
 
     @Test
+    fun `partial image and item events never expose images before a completed snapshot`() = runBlocking()
+    {
+        val state = ResponsesStreamState()
+        val slices = mutableListOf<StreamAiResponseSlice>()
+        val receive: suspend (StreamAiResponseSlice) -> Unit = { slices += it }
+        state.accept(json("""{"type":"response.image_generation_call.partial_image","item_id":"ig_1","partial_image_index":0,"partial_image_b64":"aW1hZ2U="}"""), receive)
+        state.accept(json("""{"type":"response.output_item.done","output_index":0,"item":${image()}}"""), receive)
+
+        val truncated = state.result()
+        assertNotNull(truncated.error)
+        assertTrue(truncated.generatedImages.isEmpty())
+        assertTrue(slices.isEmpty())
+
+        val final = response(image().toString(), extra = ",\"id\":\"resp_image\"")
+        state.accept(terminal(final), receive)
+        state.accept(terminal(final), receive)
+        val completed = state.result()
+        assertNull(completed.error)
+        assertEquals("resp_image", completed.responseId)
+        assertEquals(listOf(GeneratedImage("ig_1", "aW1hZ2U=")), completed.generatedImages)
+        assertEquals(final["output"], JsonArray(completed.message.responsesOutput))
+        assertTrue(slices.isEmpty())
+    }
+
+    @Test
+    fun `terminal error events cannot dispatch images even with a completed snapshot`() = runBlocking()
+    {
+        for (eventType in listOf("response.failed", "response.incomplete"))
+        {
+            val state = ResponsesStreamState()
+            val response = response("${image()},${call("call_one")}")
+            state.accept(terminal(response, eventType)) {}
+            val result = state.result()
+            assertNotNull(result.error, eventType)
+            assertTrue(result.generatedImages.isEmpty(), eventType)
+            assertTrue(result.toolCalls.isEmpty(), eventType)
+            assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+        }
+
+        val state = ResponsesStreamState()
+        state.accept(json("""{"type":"response.image_generation_call.partial_image","partial_image_b64":"aW1hZ2U="}""")) {}
+        state.accept(json("""{"type":"error","message":"Image generation interrupted"}""")) {}
+        assertNotNull(state.result().error)
+        assertTrue(state.result().generatedImages.isEmpty())
+    }
+
+    @Test
     fun `terminal failure and incomplete events cannot dispatch calls`() = runBlocking()
     {
         for ((eventType, status) in listOf("response.failed" to "failed", "response.incomplete" to "incomplete"))
@@ -224,11 +382,14 @@ class ResponsesResponseTest
     fun `transport error overrides completed snapshot and prevents dispatch`() = runBlocking()
     {
         val state = ResponsesStreamState()
-        state.accept(terminal(response(call("call_one")))) {}
+        val response = response("${call("call_one")},${image()}")
+        state.accept(terminal(response)) {}
         val failure = IllegalStateException("transport failed")
         val result = state.result(failure)
         assertEquals(failure, result.error)
         assertTrue(result.toolCalls.isEmpty())
+        assertTrue(result.generatedImages.isEmpty())
+        assertEquals(response["output"], JsonArray(result.message.responsesOutput))
     }
 
     @Test

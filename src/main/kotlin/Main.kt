@@ -231,11 +231,6 @@ fun Application.init()
             }
         }
 
-        get("/memory")
-        {
-            return@get call.respond(HttpStatusCode.OK,  memory)
-        }
-
         route("/blacklist")
         {
             get()

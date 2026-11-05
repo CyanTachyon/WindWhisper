@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import moe.tachyon.windwhisper.mainConfig
 import moe.tachyon.windwhisper.contentNegotiationJson
+import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
 import moe.tachyon.windwhisper.utils.httpClient
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import java.util.concurrent.TimeUnit
@@ -96,7 +97,10 @@ data class LoginData(
             }
             catch (error: Throwable)
             {
-                if (error is CancellationException || !readOnly || time == mainConfig.retry - 1)
+                if (error is CancellationException) throw error
+                if (!readOnly) throw UncertainToolExecutionException(
+                    "论坛写请求的结果未知，请核对论坛后恢复；不会自动重试该操作。", error)
+                if (time == mainConfig.retry - 1)
                     throw error
             }
         }

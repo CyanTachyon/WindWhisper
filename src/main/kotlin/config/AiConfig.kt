@@ -3,8 +3,8 @@ package moe.tachyon.windwhisper.config
 import com.charleskorn.kaml.YamlComment
 import com.charleskorn.kaml.YamlMap
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import java.net.URI
 
 @Serializable
 data class AiConfig(
@@ -12,69 +12,41 @@ data class AiConfig(
     val timeout: Long = 2 * 60 * 1_000,
     @YamlComment("AI服务的重试次数")
     val retry: Int = 3,
-    val webSearchKey: List<String> = listOf("your web search key"),
     val model: LlmModel = LlmModel(),
-    val vlmModel: LlmModel? = null,
 )
 {
     @Serializable
-    enum class ApiType
-    {
-        @SerialName("chat_completions")
-        CHAT_COMPLETIONS,
-
-        @SerialName("responses")
-        RESPONSES,
-    }
-
-    @Serializable
-    enum class Search
-    {
-        @SerialName("tavily")
-        TAVILY,
-
-        @SerialName("responses")
-        RESPONSES,
-
-        @SerialName("none")
-        NONE,
-    }
-
-    @Serializable
     data class LlmModel(
-        val url: String = "https://api.deepseek.com/chat/completions",
-        val model: String = "deepseek-reasoner",
+        @YamlComment("Responses API的完整接口地址")
+        val url: String = "https://api.openai.com/v1/responses",
+        val model: String = "gpt-6-astra",
         val maxConcurrency: Int = 50,
-        val visible: Boolean = false,
-        @YamlComment("思考预算，单位为token，null表示不设置")
-        @SerialName("thinking_budget")
-        val thinkingBudget: Int? = null,
+        val visible: Boolean = true,
+        @YamlComment("持续会话固定使用第一个密钥，请确保它可以访问同一服务端会话")
         val key: List<String> = listOf("your api key"),
-
         val customRequestParms: YamlMap? = null,
-        @YamlComment("API协议：chat_completions（默认）或responses；url需填写对应接口的完整地址")
-        val apiType: ApiType = ApiType.CHAT_COMPLETIONS,
-        @YamlComment("联网搜索：tavily（默认，使用webSearchKey）、responses（服务端搜索，仅限Responses API）或none（关闭）")
-        val search: Search = Search.TAVILY,
+        @YamlComment("服务端自动压缩的token阈值，至少1000，且应低于模型上下文上限")
+        val compactThreshold: Int = 100_000,
+        @YamlComment("启用Responses内置联网搜索")
+        val webSearch: Boolean = true,
+        @YamlComment("启用Responses内置图片生成")
+        val imageGeneration: Boolean = true,
     )
     {
         val semaphore by lazy { Semaphore(maxConcurrency) }
 
         init
         {
-            require(maxConcurrency > 0) { "maxConcurrency must be greater than 0" }
-            require(key.isNotEmpty()) { "chat key must not be empty" }
-            require(search != Search.RESPONSES || apiType == ApiType.RESPONSES) {
-                "search: responses requires apiType: responses"
+            val endpoint = URI(url)
+            require(endpoint.scheme in setOf("http", "https") && !endpoint.host.isNullOrBlank() &&
+                endpoint.path.trimEnd('/').endsWith("/responses") && endpoint.rawQuery == null && endpoint.rawFragment == null) {
+                "url must be a complete Responses endpoint, without query or fragment"
             }
+            require(maxConcurrency > 0) { "maxConcurrency must be greater than 0" }
+            require(key.isNotEmpty() && key.all { it.isNotBlank() }) { "Responses API keys must not be empty" }
+            require(compactThreshold >= 1_000) { "compactThreshold must be at least 1000" }
         }
     }
-
-    @Serializable
-    data class ChatModel(
-        val model: String,
-        val displayName: String = model,
-    )
 
     @Serializable
     data class Model(
@@ -93,21 +65,10 @@ data class AiConfig(
         }
     }
 
-    @Serializable
-    data class VideoModel(
-        val submitUrl: String = "https://api.siliconflow.cn/v1/video/submit",
-        val statusUrl: String = "https://api.siliconflow.cn/v1/video/status",
-        val i2vModel: String = "Wan-AI/Wan2.2-I2V-A14B",
-        val t2vModel: String = "Wan-AI/Wan2.2-T2V-A14B",
-        val sizes: List<String> = listOf("1280x720", "720x1280", "960x960"),
-        val key: List<String> = listOf("your video model api key"),
-    )
-
     init
     {
         require(timeout > 0) { "timeout must be greater than 0" }
         require(retry > 0) { "retry must be greater than 0" }
-        require(vlmModel?.visible != false) { "vlmModel must has visible ability" }
     }
 }
 

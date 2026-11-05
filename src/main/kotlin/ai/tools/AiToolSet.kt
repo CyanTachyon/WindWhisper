@@ -3,13 +3,16 @@ package moe.tachyon.windwhisper.ai.tools
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.serializer
 import moe.tachyon.windwhisper.ai.Content
-import moe.tachyon.windwhisper.ai.internal.llm.utils.aiNegotiationJson
+import kotlinx.serialization.json.Json
+import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
 import moe.tachyon.windwhisper.utils.JsonSchema
 import moe.tachyon.windwhisper.utils.generateSchema
 import kotlin.reflect.KType
 import kotlin.reflect.typeOf
+
+private val aiNegotiationJson = Json(contentNegotiationJson) { ignoreUnknownKeys = false; isLenient = true }
 
 class AiToolSet<T>
 {

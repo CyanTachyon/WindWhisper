@@ -11,7 +11,6 @@ import kotlinx.serialization.descriptors.*
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.*
-import moe.tachyon.windwhisper.ai.plugins.ContextCompressor
 import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.dataJson
@@ -283,7 +282,7 @@ data class ChatMessage(
     val reasoningContent: Content = Content(),
     @SerialName("tool_calls")
     val toolCalls: List<ToolCall> = emptyList(),
-    // Keep typed output (including encrypted reasoning) for stateless Responses continuations.
+    // Typed output for this response, used by streaming presentation and hosted tools.
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     @SerialName("responses_output")
     val responsesOutput: List<JsonObject> = emptyList(),
@@ -338,39 +337,7 @@ data class ChatMessage(
         private val gen = generatedSerializer()
         override val descriptor: SerialDescriptor = gen.descriptor
         override fun serialize(encoder: Encoder, value: ChatMessage) = gen.serialize(encoder, value)
-        @OptIn(ExperimentalUuidApi::class)
-        override fun deserialize(decoder: Decoder): ChatMessage
-        {
-            require(decoder is JsonDecoder) { "This class can be loaded only by Json" }
-            val ele = decoder.decodeJsonElement()
-            if (ele !is JsonObject) error("Expected JsonObject, found ${ele::class}")
-            if ("toolCallId" in ele || "showingType" in ele || (ele["role"] as? JsonPrimitive)?.content in listOf("CONTEXT_COMPRESSION", "tool"))
-            {
-                /// legacy format
-                val role = when((ele["role"] as? JsonPrimitive)?.content)
-                {
-                    "CONTEXT_COMPRESSION" -> Role.MARKING(ContextCompressor.MARKING_TYPE, JsonNull)
-                    "tool"                -> Role.TOOL(Uuid.random().toHexString(), "unknown")
-                    else                  -> decoder.json.decodeFromJsonElement<Role>(ele["role"] ?: error("Missing role field"))
-                }
-                val toolCallId = ele["tool_call_id"]?.let<JsonElement, String>(decoder.json::decodeFromJsonElement) ?: ""
-                val showingType = ele["showingType"]?.let<JsonElement, AiToolSet.ToolData.Type>(decoder.json::decodeFromJsonElement)
-
-                val content = decoder.json.decodeFromJsonElement<Content>(ele["content"] ?: error("Missing content field"))
-                val reasoningContent = ele["content"]?.let<JsonElement, Content>(decoder.json::decodeFromJsonElement) ?: Content()
-                val toolCalls = mutableListOf<ToolCall>()
-                return ChatMessage(
-                    role =
-                        if (toolCallId.isNotBlank()) Role.TOOL(toolCallId, "unknown")
-                        else if (showingType != null) Role.SHOWING_DATA(showingType)
-                        else role,
-                    content = content,
-                    reasoningContent = reasoningContent,
-                    toolCalls = toolCalls,
-                )
-            }
-            return decoder.json.decodeFromJsonElement(gen, ele)
-        }
+        override fun deserialize(decoder: Decoder): ChatMessage = gen.deserialize(decoder)
     }
 }
 

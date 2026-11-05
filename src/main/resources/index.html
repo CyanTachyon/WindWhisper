@@ -6,8 +6,6 @@
     <title>WindWhisper 控制台</title>
     <!-- 引入 AnsiUp 用于渲染 ANSI 颜色 -->
     <script src="$rootPath/js/ansi_up.min.js"></script>
-    <!-- 引入 Marked 用于渲染 Markdown 记忆 -->
-    <script src="$rootPath/js/marked.min.js"></script>
     <style>
         /* maple mono cdn */
         @import url("https://fontsapi.zeoseven.com/442/main/result.css");
@@ -93,7 +91,7 @@
             border-color: var(--accent-color);
         }
 
-        #memory-overlay, .modal-overlay {
+        .modal-overlay {
             position: fixed;
             top: 0;
             left: 0;
@@ -107,11 +105,11 @@
             z-index: 100;
         }
 
-        #memory-overlay.active, .modal-overlay.active {
+        .modal-overlay.active {
             display: flex;
         }
 
-        #memory-modal, .modal-window {
+        .modal-window {
             background: var(--term-bg);
             width: 100%;
             height: 100%;
@@ -175,42 +173,6 @@
             color: #fff;
         }
 
-        #memory-content {
-            flex: 1;
-            padding: 1.5rem;
-            overflow-y: auto;
-            font-family: var(--font-sans);
-            line-height: 1.6;
-        }
-
-        /* Markdown Styles */
-        #memory-content h1, #memory-content h2, #memory-content h3 {
-            color: var(--accent-color);
-            margin-top: 1.5em;
-        }
-        #memory-content pre {
-            background: #21262d;
-            padding: 1rem;
-            border-radius: 6px;
-            overflow-x: auto;
-        }
-        #memory-content code {
-            font-family: var(--font-mono);
-            background: rgba(110, 118, 129, 0.4);
-            padding: 0.2em 0.4em;
-            border-radius: 4px;
-        }
-        #memory-content pre code {
-            background: transparent;
-            padding: 0;
-        }
-        #memory-content blockquote {
-            border-left: 4px solid var(--border-color);
-            margin: 0;
-            padding-left: 1rem;
-            color: #8b949e;
-        }
-
         /* Scrollbar Styling */
         ::-webkit-scrollbar {
             width: 10px;
@@ -236,27 +198,12 @@
 <header>
     <h1>WindWhisper 终端</h1>
     <div style="display: flex; gap: 10px;">
-        <button class="btn" id="view-memory-btn">查看记忆</button>
         <button class="btn" id="view-blacklist-btn">黑名单管理</button>
     </div>
 </header>
 
 <div id="term-container">
     <div id="terminal"></div>
-</div>
-
-<!-- Only visible when toggled -->
-<div id="memory-overlay">
-    <div id="memory-modal">
-        <div class="modal-header">
-            <span class="modal-title">记忆预览</span>
-            <button class="close-btn" id="close-memory-btn">&times;</button>
-        </div>
-        <div id="memory-content">
-            <!-- Content will be injected here -->
-            <div style="text-align: center; color: #8b949e;">正在加载记忆...</div>
-        </div>
-    </div>
 </div>
 
 <!-- Blacklist Modal -->
@@ -318,46 +265,6 @@
         // Optional: show error in terminal
         // appendLog("\u001b[31m[System] Connection lost. Reconnecting...\u001b[0m");
     };
-
-    // Memory Viewer Logic
-    const viewMemoryBtn = document.getElementById('view-memory-btn');
-    const closeMemoryBtn = document.getElementById('close-memory-btn');
-    const memoryOverlay = document.getElementById('memory-overlay');
-    const memoryContent = document.getElementById('memory-content');
-
-    function toggleMemory(show) {
-        if (show) {
-            memoryOverlay.classList.add('active');
-            fetchMemory();
-        } else {
-            memoryOverlay.classList.remove('active');
-        }
-    }
-
-    viewMemoryBtn.addEventListener('click', () => toggleMemory(true));
-    closeMemoryBtn.addEventListener('click', () => toggleMemory(false));
-    memoryOverlay.addEventListener('click', (e) => {
-        if (e.target === memoryOverlay) toggleMemory(false);
-    });
-
-    async function fetchMemory() {
-        memoryContent.innerHTML = '<div style="text-align: center; color: #8b949e;">正在加载记忆...</div>';
-        try {
-            const response = await fetch('$rootPath/memory');
-            if (!response.ok) throw new Error('Network response was not ok');
-            const markdown = await response.text();
-            
-            if (!markdown.trim()) {
-                memoryContent.innerHTML = '<div style="text-align: center; color: #8b949e;">暂无记忆内容</div>';
-                return;
-            }
-
-            memoryContent.innerHTML = marked.parse(markdown);
-        } catch (error) {
-            console.error('Error fetching memory:', error);
-            memoryContent.innerHTML = `<div style="text-align: center; color: #ff7b72;">加载失败: ${error.message}</div>`;
-        }
-    }
 
     // Blacklist Logic
     const viewBlacklistBtn = document.getElementById('view-blacklist-btn');

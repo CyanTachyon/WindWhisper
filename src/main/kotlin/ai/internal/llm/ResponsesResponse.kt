@@ -9,6 +9,9 @@ import moe.tachyon.windwhisper.ai.TokenUsage
 import moe.tachyon.windwhisper.ai.UnknownAiResponseException
 import java.net.URI
 
+/** A completed image returned by the Responses image-generation tool. */
+data class GeneratedImage(val id: String, val base64: String, val format: String = "png")
+
 /** Decode the wire response, rather than the SDK-only output_text convenience property. */
 internal fun parseResponsesResponse(response: JsonObject): RequestResult
 {
@@ -16,6 +19,8 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
     val text = StringBuilder()
     val reasoning = StringBuilder()
     val calls = linkedMapOf<String, Pair<String, String>>()
+    val images = linkedMapOf<String, GeneratedImage>()
+    var hasCompaction = false
     var formatError: String? = null
 
     output.forEach { item ->
@@ -47,6 +52,24 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
                     else -> calls[callId] = name to arguments
                 }
             }
+            "image_generation_call" ->
+            {
+                val id = item.string("id")
+                val result = item.string("result")
+                val format = if ("output_format" in item) item.string("output_format") else "png"
+                when
+                {
+                    item.string("status") != "completed" ->
+                        formatError = "image_generation_call 尚未完成"
+                    id.isNullOrBlank() || result.isNullOrBlank() ->
+                        formatError = "image_generation_call 缺少 id 或 result"
+                    format == null || format !in setOf("png", "jpeg", "webp") ->
+                        formatError = "image_generation_call 的 output_format 必须是 png、jpeg 或 webp"
+                    id in images -> formatError = "image_generation_call 包含重复的 id"
+                    else -> images[id] = GeneratedImage(id, result, format)
+                }
+            }
+            "compaction" -> hasCompaction = true
         }
     }
 
@@ -65,8 +88,8 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
         formatError != null -> UnknownAiResponseException(message = "Responses API 响应格式无效: $formatError")
         response["output"] !is JsonArray || output.size != (response["output"] as JsonArray).size ->
             UnknownAiResponseException(message = "Responses API 响应格式无效: output 必须是对象数组")
-        text.isBlank() && calls.isEmpty() -> UnknownAiResponseException(message =
-            "Responses API 未返回可用的文本或函数调用")
+        text.isBlank() && calls.isEmpty() && images.isEmpty() && !hasCompaction -> UnknownAiResponseException(message =
+            "Responses API 未返回可用的文本、函数调用、图像或压缩项")
         else -> null
     }
     // Never dispatch partial or failed calls, even if a terminal error contains function_call Items.
@@ -82,6 +105,9 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
         ),
         usage = usage,
         error = error,
+        responseId = response.string("id"),
+        generatedImages = if (error == null) images.values.toList() else emptyList(),
+        responseStatus = response.string("status"),
     )
 }
 
@@ -128,12 +154,13 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
                     terminal = partialResult(UnknownAiResponseException(message = "Responses API 终止事件缺少 response"))
                     return
                 }
-                val result = parseResponsesResponse(response)
+                var result = parseResponsesResponse(response)
                 if (type != "response.completed" && result.error == null)
                 {
                     result.error = UnknownAiResponseException(message = "Responses API 响应未成功完成: $type")
                     result.toolCalls = emptyMap()
                     result.message = result.message.copy(toolCalls = emptyList())
+                    result = result.copy(generatedImages = emptyList())
                 }
                 terminal = result
                 emitMissingParts(result.message.responsesOutput, onReceive)
@@ -165,6 +192,7 @@ internal class ResponsesStreamState(private val bufferTextUntilCompleted: Boolea
                 toolCalls = emptyList(),
             ),
             error = finalError,
+            generatedImages = emptyList(),
         )
     }
 

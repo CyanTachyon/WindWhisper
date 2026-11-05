@@ -8,6 +8,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
 import moe.tachyon.windwhisper.MainConfig
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
+import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
 import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.ai.tools.Forum
@@ -186,6 +187,34 @@ class GeneratedImageUploadTest
             assertEquals(1, server.requests.size)
             assertTrue(runCatching { withTimeout(5_000) { user.put("${server.url}/write") { setBody("payload") } } }.isFailure)
             assertEquals(2, server.requests.size)
+            server.verify()
+        }
+    }
+
+    @Test
+    fun `forum tools propagate uncertain writes instead of returning retryable tool errors`() = runBlocking {
+        val store = GeneratedImageStore(directory())
+        store.save("ig_example", base64(imageBytes()), "png")
+        MockForum { request ->
+            if (request.path == "/t/7.json") Reply(topic()) else Reply(disconnect = true)
+        }.use { server ->
+            configure(server)
+            val tools = forumTools(store)
+            val cases = listOf(
+                Triple("send_post", "/posts.json", buildJsonObject { put("topicId", 7); put("content", "A single post"); put("replyTo", 0) }),
+                Triple("upload_generated_image", "/uploads.json", uploadArgs("ig_example", 7)),
+            )
+            cases.forEach { (toolName, path, arguments) ->
+                val error = runCatching {
+                    withTimeout(5_000) { invoke(tools, toolName, arguments) }
+                }.exceptionOrNull()
+                assertIs<UncertainToolExecutionException>(error, "$toolName must not swallow an uncertain write")
+                val writes = server.requests.filter { it.path == path }
+                assertEquals(1, writes.size, "$toolName must not resend a write after losing its response")
+                assertEquals("POST", writes.single().method)
+                assertTrue(writes.single().body.isNotEmpty())
+            }
+            assertEquals(3, server.requests.size)
             server.verify()
         }
     }
