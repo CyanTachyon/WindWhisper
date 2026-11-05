@@ -1,7 +1,7 @@
 # WindWhisper
 基于discourse论坛系统的AI机器人。该项目旨在为论坛增加一个拟人的用户，而不是增加一个AI助手。用户可以通过与该用户互动来获取AI生成的内容。
 
-本实验分支`codex/responses-native`全面使用OpenAI Responses API。每条论坛通知作为一条user消息追加到同一条服务端响应链，由OpenAI管理上下文和自动压缩。
+本实验分支`codex/responses-native`全面使用OpenAI Responses API。每轮将一批论坛通知集中作为一条user消息追加到同一条服务端响应链，由OpenAI管理上下文和自动压缩。
 
 ## 简要功能说明
 
@@ -80,7 +80,6 @@ proxy:
 # 流式请求为无新事件的最长等待时间，包含等待响应头。
 # 只要持续收到事件，流式请求总时长可以超过此值。
 timeout: 120000
-retry: 3
 model:
   url: "https://api.openai.com/v1/responses"
   model: "gpt-6-astra" # 使用你的API账户可访问的模型
@@ -98,28 +97,32 @@ model:
 
 `customRequestParms`接受`reasoning.effort`、`max_output_tokens`等Responses原生选项。输入、会话续接、存储与压缩参数由程序管理；内置搜索和图片生成使用专用配置字段。内置搜索引用显示为Markdown链接；回答正文在响应完成后显示，以便包含引用。
 
-编辑`prompt.txt`可自定义人格和长期指令。程序在每次API请求中发送这些指令，具体通知信息则作为独立的user消息输入。
+编辑`prompt.txt`可自定义人格和长期指令。程序在每次API请求中发送这些指令，每轮的一批通知则集中作为一条独立的user消息输入。
 
-常规请求开始、响应创建/完成、通知完成和标读详情使用`FINE`日志，默认`INFO`不显示；排查时可在控制台执行`logger level FINE`。长时间等待、重试和通知概览仍会显示。收到成功响应中的`compaction`项时，会以`INFO`记录`Responses API context compaction result received`，不打印加密压缩内容，也不推测压缩前后的token数量；恢复GET可能再次确认同一响应中的压缩结果。
+常规请求开始、响应创建/完成、通知完成和标读详情使用`FINE`日志，默认`INFO`不显示；排查时可在控制台执行`logger level FINE`。长时间等待、异常提示和通知概览仍会显示。收到成功响应中的`compaction`项时，会以`INFO`记录`Responses API context compaction result received`，不打印加密压缩内容，也不推测压缩前后的token数量；恢复GET可能再次确认同一响应中的压缩结果。
 
 ### 持续会话与旧版本迁移
 
 本分支设置`store: true`，通过`previous_response_id`续接，并启用`context_management`自动压缩。不创建单独的Conversations API对象，也不逐次重发完整历史。参见官方[会话状态](https://developers.openai.com/api/docs/guides/conversation-state)和[上下文压缩](https://developers.openai.com/api/docs/guides/compaction)文档。
 
-`data/responses-session.json`保存续接所需的响应ID及通知、工具执行状态，供重启后恢复使用。这是程序控制状态，不是模型输出的摘要；重启时请保留该文件。运行中更改论坛身份、API地址或第一个API密钥会暂停新通知处理；需重新启动并使用匹配的会话数据，更换账户时应使用独立工作目录。旧的`data/memory.md`不再读取或更新，现有用户文件不会被自动删除。
+`data/responses-session.json`保存续接所需的响应ID及通知、工具执行状态，供重启后恢复使用。这是程序控制状态，不是模型输出的摘要；重启时请保留该文件。运行中更改论坛身份、API地址或第一个API密钥会报错并结束通知循环；需要恢复匹配的配置后重启，更换账户时应使用独立工作目录。旧的`data/memory.md`不再读取或更新，现有用户文件不会被自动删除。
 
-已有部署需按上例更新`configs/ai.yml`，移除旧的`apiType`、`search`、`webSearchKey`、`vlmModel`、`thinking_budget`字段。还需修改现有`prompt.txt`：移除输出或重建完整笔记的要求，以及`${self_memory}`、`${topic_id}`占位符。默认提示词只会在文件缺失时生成，不会覆盖已有自定义内容。
+每轮轮询收集所有尚未处理的通知，按notification ID去重，再从旧到新列在同一条user消息中。同一话题的多个通知仍保留各自ID，供模型统一处理。程序先补充标读，再恢复尚未完成的批次；每轮最多提交一条新的批量消息。
+
+批次失败时，程序立即丢弃整批并尝试将所有通知标为已读；模型请求不自动重试，也不会在下一次五秒轮询时重新执行该批次。已经发生的论坛操作不会回滚。标读失败的ID保留在账本中重试，即使通知已不在当前未读页，也不会再次调用模型。每个ID每轮最多尝试标读一次；某条标读失败不会阻塞其他通知标读或新批次处理，旧通知也不会重新发给模型。停止或取消程序则保留待处理批次，供下次恢复。检查点分别记录这些通知处理状态与服务端会话的续接信息。
+
+已有部署需按上例更新`configs/ai.yml`，移除其中旧的`retry`、`apiType`、`search`、`webSearchKey`、`vlmModel`、`thinking_budget`字段；`config.json`中的论坛登录`retry`选项仍然保留。还需修改现有`prompt.txt`：移除输出或重建完整笔记的要求，以及`${self_memory}`、`${topic_id}`占位符，并将只处理单条通知的指令改成统一处理一批通知。默认提示词只会在文件缺失时生成，不会覆盖已有自定义内容。
 
 ### 会话过期与人工恢复
 
 OpenAI默认保留响应对象30天，因此长期空闲后`previous_response_id`可能失效。本分支的本地检查点无法重建已过期的远端上下文，程序也不会静默丢弃它并另起会话。参见官方[响应保留期限说明](https://developers.openai.com/api/docs/guides/conversation-state)。
 
-如果待处理轮次的`executingToolId`不为空，说明程序在工具结果落盘前中断。写操作可能已到达论坛，执行结果尚未确认；程序会停止恢复，避免重复执行。必须先核对论坛与日志，再人工恢复，不要直接清空标记或盲目重试发帖、点赞、上传图片。对于模型已完成但标读失败的通知，程序另存确认账本，即使通知不再出现在当前未读页，也只重试标读，不会再次调用模型。
+如果待处理轮次的`executingToolId`不为空，说明程序在工具结果落盘前中断。写操作可能已到达论坛，执行结果尚未确认；恢复时会将该批次按失败丢弃，不重复执行该操作。采取人工操作前应核对论坛与日志，不要直接清空标记或盲目重试发帖、点赞、上传图片。丢弃批次无法修复已过期的服务端上下文；继续处理后续通知前，应按下面的步骤核对并重置会话。
 
 如需在会话过期或中断状态无法续接后主动开始新会话：
 
 1. 停止WindWhisper。根据当前启动配置确认实际数据目录：`-dataDir=/path`会覆盖默认路径；否则使用`-workDir`下的`data`，未设置`-workDir`时为当前工作目录下的`data`。
-2. 根据检查点与日志定位待处理通知，核对论坛中的近期操作。人工确认并处理结果不明的写操作；已处理完的通知应先在论坛标为已读。重置检查点也会清除已完成通知的记录，仍未读的通知可能再次被处理。
+2. 根据日志和仍待处理的检查点定位近期批次，核对论坛中的操作。人工确认并处理结果不明的写操作；已处理完的通知应先在论坛标为已读。重置检查点也会清除已完成通知的记录，仍未读的通知可能再次被处理。
 3. 备份该目录中的`responses-session.json`，随后仅移走或删除生效的`responses-session.json`，例如重命名为`responses-session.backup.json`。保留`generated-images/`、配置和其他用户数据。
 4. 确认论坛账户与Responses密钥后重新启动。检查点缺失时，程序使用当前`prompt.txt`开始新会话，不会恢复旧会话；重置前务必完成上述论坛状态核对。
 
@@ -145,7 +148,7 @@ java -jar WindWhisper.jar
 ## 工作原理简介
 
 WindWhisper重复执行以下步骤：
-1. 读取论坛未读通知，并逐条串行处理。
-2. 将包含notification ID和topic ID的user消息追加到已有响应链，同时提供论坛工具和启用的内置工具。
-3. 执行模型调用的论坛工具，将结果发送回同一响应链，直到模型完成当前任务。
-4. 保存续接和执行状态，再确认已完成的通知。下一条通知继续原对话，Responses API负责压缩上下文。
+1. 补做尚未成功的标读，并恢复因停机中断的批次（如有）。
+2. 收集尚未处理的通知，从旧到新列出所有notification ID和topic ID，集中作为一条user消息追加到已有响应链，同时提供论坛工具和启用的内置工具。
+3. 执行模型调用的论坛工具，将结果发送回同一响应链，直到模型完成或批次失败。
+4. 保存续接和通知处理状态，再将整批通知标为已读；失败批次直接丢弃，不重新执行。下一批通知继续原对话，Responses API负责压缩上下文。

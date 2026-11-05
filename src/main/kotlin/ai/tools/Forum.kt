@@ -1,8 +1,6 @@
 package moe.tachyon.windwhisper.ai.tools
 
 import kotlinx.serialization.Serializable
-import kotlinx.coroutines.CancellationException
-import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
 import moe.tachyon.windwhisper.ai.Content
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.forum.LoginData
@@ -87,17 +85,14 @@ class Forum(
         {
             if (parm.topicId in blackList)
                 return@registerTool AiToolInfo.ToolResult(Content("你被禁止访问话题ID ${parm.topicId}，无法上传图片。"))
-            try
-            {
-                require(parm.topicId > 0 && user.getTopic(parm.topicId) != null) { "目标话题不存在" }
-                val markdown = user.uploadGeneratedImage(images.read(parm.imageId))
-                AiToolInfo.ToolResult(Content("图片已上传，可在话题ID ${parm.topicId} 的 send_post.content 中使用以下 Markdown：\n$markdown"))
-            }
-            catch (error: Throwable)
-            {
-                if (error is CancellationException || error is UncertainToolExecutionException) throw error
-                AiToolInfo.ToolResult(Content("上传生成图片失败：${error.message ?: "未知错误"}"))
-            }
+            if (parm.topicId <= 0 || user.getTopic(parm.topicId) == null)
+                return@registerTool AiToolInfo.ToolResult(Content("目标话题不存在"))
+            if (!parm.imageId.matches(Regex("[A-Za-z0-9_-]{1,200}")))
+                return@registerTool AiToolInfo.ToolResult(Content("生成图片 ID 无效"))
+            if (!images.contains(parm.imageId))
+                return@registerTool AiToolInfo.ToolResult(Content("未找到生成图片 ID"))
+            val markdown = user.uploadGeneratedImage(images.read(parm.imageId))
+            AiToolInfo.ToolResult(Content("图片已上传，可在话题ID ${parm.topicId} 的 send_post.content 中使用以下 Markdown：\n$markdown"))
         }
 
         registerTool<GetTopicParams>(
@@ -107,7 +102,7 @@ class Forum(
         )
         {
             val sb = StringBuilder()
-            for (topicId in parm.topicIds) runCatching()
+            for (topicId in parm.topicIds)
             {
                 val topic = user.getTopic(topicId)
 
@@ -140,10 +135,6 @@ class Forum(
                     if (topic.id in blackList)
                         sb.append("注意：你被禁止在该话题中发言和点赞等操作。但你仍然可以阅读内容。\n")
                 }
-            }.getOrElse()
-            {
-                if (it is CancellationException || it is UncertainToolExecutionException) throw it
-                sb.append("- 获取话题${topicId}信息时出错: ${it.stackTraceToString()}")
             }
             AiToolInfo.ToolResult(
                 content = Content(sb.toString())
@@ -159,41 +150,33 @@ class Forum(
             val sb = StringBuilder()
             parm.posts.forEach()
             { target ->
-                runCatching()
-                {
-                    val posts = user.getPosts(target.topicId, target.postNumber)
-                    sb.append("==== 话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息 ====\n\n")
-                    posts.forEach()
-                    { post ->
-                        if ("!ww" in post.cooked || "！ww" in post.cooked.lowercase())
-                        {
-                            sb.append("<!-- 你无权查看该楼层，楼层编号（post_number）为${post.postNumber} -->")
-                            sb.append("\n\n")
-                            return@forEach
-                        }
-
-                        sb.append("帖子ID: ${post.id}\n")
-                        sb.append("楼层（post_number）: ${post.postNumber}\n")
-                        sb.append("作者: ${post.username}\n")
-                        sb.append("回复至楼层: ${post.replyTo}\n")
-                        sb.append("我的点赞状态: ${post.myReaction}\n")
-                        sb.append("点赞统计:\n")
-                        if (post.reactions.isEmpty()) sb.append(" 无任何点赞\n")
-                        else post.reactions.forEach { (reaction, count) ->
-                            if (count > 0 && reaction in mainConfig.reactions.keys)
-                                sb.append("  `${reaction}`: ${count}\n")
-                        }
-                        sb.append("<!--post-content-start-->\n")
-                        sb.append(post.cooked)
-                        sb.append("\n<!--post-content-end-->\n")
-                        sb.append("\n---\n")
+                val posts = user.getPosts(target.topicId, target.postNumber)
+                sb.append("==== 话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息 ====\n\n")
+                posts.forEach postLoop@ { post ->
+                    if ("!ww" in post.cooked || "！ww" in post.cooked.lowercase())
+                    {
+                        sb.append("<!-- 你无权查看该楼层，楼层编号（post_number）为${post.postNumber} -->")
+                        sb.append("\n\n")
+                        return@postLoop
                     }
-                    sb.append("\n\n")
-                }.getOrElse()
-                {
-                    if (it is CancellationException || it is UncertainToolExecutionException) throw it
-                    sb.append("获取话题ID ${target.topicId} 的楼层 ${target.postNumber} 附近的帖子信息时出错: ${it.stackTraceToString()}\n")
+
+                    sb.append("帖子ID: ${post.id}\n")
+                    sb.append("楼层（post_number）: ${post.postNumber}\n")
+                    sb.append("作者: ${post.username}\n")
+                    sb.append("回复至楼层: ${post.replyTo}\n")
+                    sb.append("我的点赞状态: ${post.myReaction}\n")
+                    sb.append("点赞统计:\n")
+                    if (post.reactions.isEmpty()) sb.append(" 无任何点赞\n")
+                    else post.reactions.forEach { (reaction, count) ->
+                        if (count > 0 && reaction in mainConfig.reactions.keys)
+                            sb.append("  `${reaction}`: ${count}\n")
+                    }
+                    sb.append("<!--post-content-start-->\n")
+                    sb.append(post.cooked)
+                    sb.append("\n<!--post-content-end-->\n")
+                    sb.append("\n---\n")
                 }
+                sb.append("\n\n")
             }
             AiToolInfo.ToolResult(content = Content(sb.toString()))
         }
@@ -210,28 +193,8 @@ class Forum(
                     content = Content("你被禁止访问话题ID ${parm.topicId}，无法发送帖子。"),
                 )
             }
-            runCatching()
-            {
-                val success = user.sendPosts(parm.topicId, parm.content, parm.replyTo)
-                if (success)
-                {
-                    AiToolInfo.ToolResult(
-                        content = Content("成功发送帖子到话题ID ${parm.topicId}。"),
-                    )
-                }
-                else
-                {
-                    AiToolInfo.ToolResult(
-                        content = Content("发送帖子到话题ID ${parm.topicId} 失败。"),
-                    )
-                }
-            }.getOrElse()
-            {
-                if (it is CancellationException || it is UncertainToolExecutionException) throw it
-                AiToolInfo.ToolResult(
-                    content = Content("发送帖子时出错: ${it.stackTraceToString()}"),
-                )
-            }
+            check(user.sendPosts(parm.topicId, parm.content, parm.replyTo)) { "发送帖子到话题ID ${parm.topicId} 失败" }
+            AiToolInfo.ToolResult(Content("成功发送帖子到话题ID ${parm.topicId}。"))
         }
 
         registerTool<ToggleLikeParams>(
@@ -261,7 +224,7 @@ class Forum(
             }
             val alreadyLiked = posts.filter { it.myReaction != null }.map { it.id }
 
-            for (action in parm.actions) runCatching()
+            for (action in parm.actions)
             {
                 if (action.topicId in blackList)
                     return@registerTool AiToolInfo.ToolResult(content = Content("你被禁止访问话题ID ${action.topicId}，无法进行点赞操作。"))
@@ -269,24 +232,17 @@ class Forum(
                 if (action.postId in alreadyLiked)
                 {
                     sb.append("- 帖子ID ${action.postId} 已经被你点赞过了，不能重复点赞。\n")
-                    return@runCatching
+                    continue
                 }
 
                 if (posts.none { it.id == action.postId })
                 {
                     sb.append("- 帖子ID ${action.postId} 不存在，无法进行点赞操作。\n")
-                    return@runCatching
+                    continue
                 }
 
-                val success = user.toggleLike(action.postId, action.action)
-                if (success)
-                    sb.append("- 点赞帖子ID ${action.postId} 成功。\n")
-                else
-                    sb.append("- 点赞帖子ID ${action.postId} 失败。\n")
-            }.getOrElse()
-            {
-                if (it is CancellationException || it is UncertainToolExecutionException) throw it
-                sb.append("- 点赞帖子ID ${action.postId} 时出错: ${it.stackTraceToString()}\n")
+                check(user.toggleLike(action.postId, action.action)) { "点赞帖子ID ${action.postId} 失败" }
+                sb.append("- 点赞帖子ID ${action.postId} 成功。\n")
             }
 
             AiToolInfo.ToolResult(

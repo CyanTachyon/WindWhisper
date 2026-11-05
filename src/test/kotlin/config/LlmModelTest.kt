@@ -66,7 +66,7 @@ class LlmModelTest
     fun serializedConfigurationContainsNoLegacyProtocolOrMemoryOptions()
     {
         val text = yaml.encodeToString(AiConfig())
-        for (name in listOf("apiType", "search:", "webSearchKey", "vlmModel", "thinking_budget", "toolable", "supportToolCalls"))
+        for (name in listOf("retry:", "apiType", "search:", "webSearchKey", "vlmModel", "thinking_budget", "toolable", "supportToolCalls"))
             assertFalse(name in text, name)
     }
 }

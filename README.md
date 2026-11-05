@@ -1,7 +1,7 @@
 # WindWhisper
 An AI bot based on the Discourse forum system. This project aims to add a personified user to the forum, rather than an AI assistant. Users can interact with this user to obtain AI-generated content.
 
-This experimental `codex/responses-native` branch uses the OpenAI Responses API throughout. Each forum notification adds a user message to one ongoing server-side response chain; OpenAI manages its context and automatic compaction.
+This experimental `codex/responses-native` branch uses the OpenAI Responses API throughout. Each poll adds one user message containing a batch of forum notifications to an ongoing server-side response chain; OpenAI manages its context and automatic compaction.
 
 ## Brief Feature Description
 
@@ -80,7 +80,6 @@ Edit `configs/ai.yml`:
 # maximum time without a new event for streams, including waiting for response headers.
 # Active streams may run longer as long as events keep arriving.
 timeout: 120000
-retry: 3
 model:
   url: "https://api.openai.com/v1/responses"
   model: "gpt-6-astra" # Use a model available to your account
@@ -98,28 +97,32 @@ model:
 
 `customRequestParms` accepts native Responses options such as `reasoning.effort` and `max_output_tokens`. The application owns input, continuation, storage, and compaction settings. Use the dedicated configuration fields for hosted search and image generation. Hosted-search citations appear as Markdown links; answer text is displayed after completion so those links can be included.
 
-Edit `prompt.txt` to customize the bot's personality and standing instructions. These instructions are sent with each API request; notification details arrive separately as user messages.
+Edit `prompt.txt` to customize the bot's personality and standing instructions. These instructions are sent with each API request; each poll's notification batch arrives separately in one user message.
 
-Routine request start, response creation/completion, notification completion, and read acknowledgements use `FINE` logging and are hidden at the default `INFO` level. Use `logger level FINE` in the console for diagnostics. Long waits, retries, and notification summaries remain visible. A successful response containing a `compaction` item produces an `INFO` entry, `Responses API context compaction result received`, without encrypted contents or guessed before/after token counts. Recovery GETs may confirm the same response's compaction result again.
+Routine request start, response creation/completion, notification completion, and read acknowledgements use `FINE` logging and are hidden at the default `INFO` level. Use `logger level FINE` in the console for diagnostics. Long waits, errors, and notification summaries remain visible. A successful response containing a `compaction` item produces an `INFO` entry, `Responses API context compaction result received`, without encrypted contents or guessed before/after token counts. Recovery GETs may confirm the same response's compaction result again.
 
 ### Continuous conversation and migration
 
 This branch sends `store: true`, continues with `previous_response_id`, and enables `context_management` compaction. It does not use a separate Conversations API object or resend the whole conversation history. See the official [conversation state](https://developers.openai.com/api/docs/guides/conversation-state) and [compaction](https://developers.openai.com/api/docs/guides/compaction) documentation.
 
-`data/responses-session.json` holds the response ID and notification/tool execution state needed for continuation and recovery. It is control state, not a model-written summary. Keep it when restarting the program. Changing the forum identity, API endpoint, or first API key pauses new notification processing; restart with matching session data, and use a separate working directory for a different account. The prior `data/memory.md` is no longer read or updated, and existing user files are not deleted automatically.
+`data/responses-session.json` holds the response ID and notification/tool execution state needed for continuation and recovery. It is control state, not a model-written summary. Keep it when restarting the program. Changing the forum identity, API endpoint, or first API key stops the notification loop with an error; restore the matching configuration and restart. Use a separate working directory for a different account. The prior `data/memory.md` is no longer read or updated, and existing user files are not deleted automatically.
 
-For an existing installation, update `configs/ai.yml` to the example above and remove the old `apiType`, `search`, `webSearchKey`, `vlmModel`, and `thinking_budget` fields. Update your existing `prompt.txt` as well: remove instructions to output or reconstruct a complete notebook and remove `${self_memory}` / `${topic_id}` placeholders. The bundled default prompt only initializes missing files, so it will not overwrite an existing prompt.
+Each poll collects all unprocessed notifications, deduplicates them by notification ID, and lists them oldest first in one user message. Multiple notifications for the same topic retain their separate IDs so the model can handle that topic together. Only one new batch is submitted per poll, after any pending batch has been recovered and outstanding read acknowledgements have been retried.
+
+When a batch fails, the application immediately discards that batch and attempts to mark all of its notifications as read. Model requests are not automatically retried, and the batch is not rerun at the next five-second poll. Forum actions already performed are not rolled back. A read-acknowledgement failure remains in the ledger for retry, even if the notification is no longer on the current unread page. Each ID is acknowledged at most once per poll; a failed acknowledgement does not block other acknowledgements or new notification batches, and the old notification is never sent back to the model. Stopping or cancelling the application instead preserves the pending batch for recovery. The checkpoint tracks these delivery decisions separately from the server's conversation context.
+
+For an existing installation, update `configs/ai.yml` to the example above and remove its old `retry`, `apiType`, `search`, `webSearchKey`, `vlmModel`, and `thinking_budget` fields. The forum-login `retry` setting in `config.json` remains supported. Update your existing `prompt.txt` as well: remove instructions to output or reconstruct a complete notebook and remove `${self_memory}` / `${topic_id}` placeholders. Revise single-notification instructions to handle a batch of notifications together. The bundled default prompt only initializes missing files, so it will not overwrite an existing prompt.
 
 ### Expiration and manual recovery
 
 OpenAI stores response objects for 30 days by default, so `previous_response_id` may become unavailable after a long idle period. This branch's local checkpoint cannot reconstruct expired remote context, and the application does not silently discard it to start another conversation. See the official [response retention documentation](https://developers.openai.com/api/docs/guides/conversation-state).
 
-If a pending turn has a non-null `executingToolId`, the process stopped before a tool result was checkpointed. A write operation may already have reached the forum, so its outcome is unknown. The application stops recovery instead of repeating that operation. Check the forum and logs before manually recovering; do not blindly clear the marker or retry a post, reaction, or image upload. Completed notifications whose read acknowledgement failed are kept in a separate control ledger and retried without running the model again, even if they no longer appear in the current unread page.
+If a pending turn has a non-null `executingToolId`, the process stopped before a tool result was checkpointed. A write operation may already have reached the forum, so its outcome is unknown. Recovery treats this as a failed batch and discards it without repeating the operation. Check the forum and logs before taking any manual action; do not blindly clear the marker or retry a post, reaction, or image upload. Expired server context cannot be repaired by discarding a batch; review and reset the conversation as described below before processing further notifications.
 
 To deliberately start a new conversation after expiration or an unresolved interrupted turn:
 
 1. Stop WindWhisper. Confirm the actual data directory from your current launch configuration: `-dataDir=/path` overrides it; otherwise it is `data` under `-workDir` (the current working directory by default).
-2. Inspect the pending notification and recent forum actions, using the checkpoint and logs to identify them. Resolve any uncertain write result manually, and mark notifications already handled as read in the forum before restarting. Resetting the checkpoint also removes its completed-notification ledger, so unread notifications can be processed again.
+2. Inspect recent batches and forum actions using the logs and any pending checkpoint. Resolve uncertain write results manually, and mark notifications already handled as read in the forum before restarting. Resetting the checkpoint also removes its completed-notification ledger, so unread notifications can be processed again.
 3. Back up `responses-session.json` from that data directory, then move or delete only the active `responses-session.json`. For example, rename it to `responses-session.backup.json`. Keep `generated-images/`, your configuration, and other user data.
 4. Restart with the intended forum account and Responses credentials. The missing checkpoint starts a fresh conversation with the current `prompt.txt`; it does not recover the old conversation. Only reset after reviewing the forum state as above.
 
@@ -145,7 +148,7 @@ The program should connect to the forum and start working. You can see log outpu
 ## Brief Working Principle Introduction
 
 WindWhisper repeats the following steps:
-1. Read unread forum notifications and process them serially.
-2. Append a user message containing the notification ID and topic ID to the existing response chain, with forum tools and enabled hosted tools available.
-3. Execute requested forum tools and send their results back to the same response chain until the model finishes.
-4. Persist continuation/execution state and acknowledge the completed notification. The next notification continues the conversation, with context compaction handled by the Responses API.
+1. Retry outstanding read acknowledgements and recover a batch interrupted by shutdown, if any.
+2. Collect unprocessed notifications oldest first and append one user message listing all notification IDs and topic IDs to the existing response chain, with forum tools and enabled hosted tools available.
+3. Execute requested forum tools and send their results back to the same response chain until the model finishes or the batch fails.
+4. Persist continuation and delivery state, then mark the batch's notifications as read. A failed batch is discarded rather than replayed. The next batch continues the conversation, with context compaction handled by the Responses API.

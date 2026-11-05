@@ -6,6 +6,7 @@ import moe.tachyon.windwhisper.ai.StreamAiResponseSlice
 import moe.tachyon.windwhisper.ai.TokenUsage
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -150,7 +151,6 @@ class ResponsesResponseTest
             JsonObject(valid + ("result" to JsonPrimitive(" "))),
             JsonObject(valid - "status"),
             JsonObject(valid + ("status" to JsonPrimitive("in_progress"))),
-            JsonObject(valid + ("status" to JsonPrimitive("failed"))),
             JsonObject(valid + ("output_format" to JsonPrimitive("gif"))),
             JsonObject(valid + ("output_format" to JsonNull)),
         )
@@ -170,6 +170,89 @@ class ResponsesResponseTest
         val invalidCall = parseResponsesResponse(response("""$valid,{"type":"function_call","name":"lookup","arguments":"{}"}"""))
         assertNotNull(invalidCall.error)
         assertTrue(invalidCall.generatedImages.isEmpty())
+    }
+
+    @Test
+    fun `completed response containing unfinished image and send_post rejects all dispatch`()
+    {
+        for (imageStatus in listOf("generating", "in_progress"))
+        {
+            // Exact production shape: reasoning, unfinished hosted image with no result fields,
+            // further reasoning, then a completed application write in the same root response.
+            val output = """
+                {"id":"rs_before","type":"reasoning","summary":[]},
+                {"id":"ig_pending","type":"image_generation_call","status":"$imageStatus"},
+                {"id":"rs_after","type":"reasoning","summary":[]},
+                {"id":"fc_post","type":"function_call","status":"completed","call_id":"call_post",
+                 "name":"send_post","arguments":"{\"topicId\":7,\"content\":\"Generated image is ready\",\"replyTo\":0}"}
+            """.trimIndent()
+            val response = response(output, extra = ""","id":"resp_terminal","error":null,"usage":{"input_tokens":12,"output_tokens":8,"total_tokens":20}""")
+            val result = parseResponsesResponse(response)
+
+            val error = assertIs<ResponsesImageGenerationStateException>(result.error)
+            assertEquals("ig_pending", error.imageId)
+            assertEquals(imageStatus, error.imageStatus)
+            assertTrue(error.message!!.contains("终态不一致"))
+            assertEquals("completed", result.responseStatus)
+            assertEquals("resp_terminal", result.responseId)
+            assertEquals(TokenUsage(8, 12, 20), result.usage)
+            assertTrue(result.toolCalls.isEmpty())
+            assertTrue(result.message.toolCalls.isEmpty())
+            assertTrue(result.generatedImages.isEmpty())
+            assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+        }
+    }
+
+    @Test
+    fun `failed image is a terminal tool failure and retains server error details`()
+    {
+        val failed = json("""{"id":"ig_failed","type":"image_generation_call","status":"failed","result":null,
+            "error":{"code":"moderation_blocked","message":"Image generation was blocked","type":"image_generation_error"}}""")
+        val response = response("${image("ig_success")},${message("Image generation failed.")},$failed,${call("call_one")}")
+        val result = parseResponsesResponse(response)
+
+        val error = assertIs<ResponsesImageGenerationFailedException>(result.error)
+        assertEquals("ig_failed", error.imageId)
+        assertEquals("moderation_blocked", error.code)
+        assertTrue(error.message!!.contains("内置图片生成失败"))
+        assertTrue(error.message!!.contains("Image generation was blocked"))
+        assertTrue(!error.message!!.contains("尚未完成"))
+        assertEquals("completed", result.responseStatus)
+        assertEquals("Image generation failed.", result.message.content.toText())
+        assertTrue(result.toolCalls.isEmpty())
+        assertTrue(result.message.toolCalls.isEmpty())
+        assertTrue(result.generatedImages.isEmpty())
+        assertEquals(response["output"], JsonArray(result.message.responsesOutput))
+    }
+
+    @Test
+    fun `failed image with no error details never requires a generated image payload`()
+    {
+        for (resultField in listOf(",\"result\":null", ",\"result\":\"partial-data\""))
+        {
+            val failed = """{"id":"ig_failed","type":"image_generation_call","status":"failed"$resultField}"""
+            val result = parseResponsesResponse(response(failed))
+            val error = assertIs<ResponsesImageGenerationFailedException>(result.error)
+            assertNull(error.code)
+            assertTrue(error.message!!.contains("服务端未提供错误详情"))
+            assertTrue(result.generatedImages.isEmpty())
+            assertTrue(result.toolCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `unfinished root response is distinct from inconsistent completed image state`()
+    {
+        for (status in listOf("queued", "in_progress"))
+        {
+            val result = parseResponsesResponse(response(
+                """{"id":"ig_pending","type":"image_generation_call","status":"generating","result":null}""", status))
+            assertNotNull(result.error)
+            assertTrue(result.error !is ResponsesImageGenerationStateException)
+            assertEquals(status, result.responseStatus)
+            assertTrue(result.generatedImages.isEmpty())
+            assertTrue(result.toolCalls.isEmpty())
+        }
     }
 
     @Test
@@ -327,6 +410,37 @@ class ResponsesResponseTest
         assertEquals(listOf(GeneratedImage("ig_1", "aW1hZ2U=")), completed.generatedImages)
         assertEquals(final["output"], JsonArray(completed.message.responsesOutput))
         assertTrue(slices.isEmpty())
+    }
+
+    @Test
+    fun `SSE terminal snapshot cannot dispatch partial failed or still generating images`() = runBlocking()
+    {
+        for (imageStatus in listOf("failed", "generating", "in_progress"))
+        {
+            val state = ResponsesStreamState()
+            val failedItem = """{"id":"ig_pending","type":"image_generation_call","status":"$imageStatus","result":null}"""
+            state.accept(json("""{"type":"response.image_generation_call.partial_image","item_id":"ig_pending","partial_image_index":0,"partial_image_b64":"aW1hZ2U="}""")) {}
+            state.accept(json("""{"type":"response.output_item.done","output_index":0,"item":$failedItem}""")) {}
+            assertTrue(!state.isTerminal)
+            assertTrue(state.result().generatedImages.isEmpty())
+
+            val final = response("$failedItem,${image("ig_success")},${call("call_post", "send_post")}", extra = ",\"id\":\"resp_images\"")
+            state.accept(terminal(final)) {}
+            assertTrue(state.isTerminal)
+            val result = state.result()
+            if (imageStatus == "failed") assertIs<ResponsesImageGenerationFailedException>(result.error)
+            else assertIs<ResponsesImageGenerationStateException>(result.error)
+            assertEquals("completed", result.responseStatus)
+            assertEquals("resp_images", result.responseId)
+            assertTrue(result.toolCalls.isEmpty())
+            assertTrue(result.message.toolCalls.isEmpty())
+            assertTrue(result.generatedImages.isEmpty())
+            assertEquals(final["output"], JsonArray(result.message.responsesOutput))
+
+            state.accept(terminal(response(image("ig_later").toString()))) {}
+            assertEquals("resp_images", state.result().responseId)
+            assertTrue(state.result().generatedImages.isEmpty())
+        }
     }
 
     @Test

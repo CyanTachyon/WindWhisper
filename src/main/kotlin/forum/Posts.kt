@@ -67,7 +67,8 @@ suspend fun LoginData.getTopic(topic: Int): Topic? = logger.warning("Failed to g
     }
     val body = res.body<JsonObject>()
     val title = body["title"]!!.jsonPrimitive.content
-    val category = runCatching { getCategory(body["category_id"]!!.jsonPrimitive.int) }.getOrNull()
+    val categoryId = body["category_id"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.int
+    val category = categoryId?.let { getCategory(it) }
     val highestPostNumber = body["highest_post_number"]!!.jsonPrimitive.int
     val archetype = body["archetype"]!!.jsonPrimitive.content
     val result = Topic(title, topic, category, highestPostNumber, archetype)
@@ -119,9 +120,12 @@ suspend fun LoginData.getPosts(topic: Int, posts: List<Int>): List<PostData> = l
 {
     val url = "${mainConfig.url}/t/$topic/posts.json?${posts.joinToString("&") { "post_ids%5B%5D=$it" }}&include_suggested=false"
     val res = get(url)
-    val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: return emptyList()
+    if (res.status.value == 404) return emptyList()
+    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}" }
+    val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: error("Forum response is missing post_stream")
     val tmp = body["posts"]?.jsonArray?.associate { it.jsonObject["id"]!!.jsonPrimitive.int to it.jsonObject }
-    tmp?.mapNotNull { (id, json) ->
+        ?: error("Forum post_stream is missing posts")
+    tmp.mapNotNull { (id, json) ->
         val topicId = json["topic_id"]!!.jsonPrimitive.int
         val username = json["username"]!!.jsonPrimitive.content
         val cooked = json["cooked"]!!.jsonPrimitive.content
@@ -135,16 +139,19 @@ suspend fun LoginData.getPosts(topic: Int, posts: List<Int>): List<PostData> = l
             reactionId to count
         }?.toMap() ?: emptyMap()
         PostData(id, topicId, username, cooked, replyTo, postNumber, myReaction, reactions)
-    } ?: emptyList()
+    }
 }.getOrThrow()
 
 suspend fun LoginData.getPosts(topic: Int, postNumber: Int): List<PostData> = logger.warning("Failed to get posts from number $postNumber in topic $topic")
 {
     val url = "${mainConfig.url}/t/$topic/${postNumber}.json?include_suggested=false"
     val res = get(url)
-    val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: return emptyList()
+    if (res.status.value == 404) return emptyList()
+    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}" }
+    val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: error("Forum response is missing post_stream")
     val tmp = body["posts"]?.jsonArray?.associate { it.jsonObject["id"]!!.jsonPrimitive.int to it.jsonObject }
-    tmp?.mapNotNull { (id, json) ->
+        ?: error("Forum post_stream is missing posts")
+    tmp.mapNotNull { (id, json) ->
         val topicId = json["topic_id"]!!.jsonPrimitive.int
         val username = json["username"]!!.jsonPrimitive.content
         val cooked = json["cooked"]!!.jsonPrimitive.content
@@ -158,7 +165,7 @@ suspend fun LoginData.getPosts(topic: Int, postNumber: Int): List<PostData> = lo
             reactionId to count
         }?.toMap() ?: emptyMap()
         PostData(id, topicId, username, cooked, replyTo, postNumber, myReaction, reactions)
-    } ?: emptyList()
+    }
 }.getOrThrow()
 
 suspend fun LoginData.sendPosts(topic: Int, content: String, replyTo: Int): Boolean = logger.warning("Failed to send post to topic $topic")

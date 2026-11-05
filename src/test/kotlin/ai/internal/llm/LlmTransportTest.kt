@@ -1,12 +1,15 @@
 package moe.tachyon.windwhisper.ai.internal.llm
 
 import com.sun.net.httpserver.HttpServer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import moe.tachyon.windwhisper.ai.*
 import moe.tachyon.windwhisper.ai.tools.AiToolInfo
+import moe.tachyon.windwhisper.ai.tools.AiToolSet
+import moe.tachyon.windwhisper.ai.tools.ReadImage
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.initializeTestEnvironment
 import java.io.File
@@ -47,7 +50,8 @@ class LlmTransportTest
             }
         }.use { server ->
             val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Find facts"),
-                instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = session, turnId = "n1", stream = false) }
+                instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = session, turnId = "batch-native",
+                deliveryIds = listOf("n1", "n2"), stream = false) }
             server.verify()
             assertIs<AiResult.Success>(result)
             assertEquals(listOf("facts"), calls)
@@ -56,7 +60,8 @@ class LlmTransportTest
             assertEquals(listOf(cited), result.messages.last().responsesOutput)
             assertTrue(result.messages.last().content.toText().contains(source))
             assertEquals("resp_final", session.state.previousResponseId)
-            assertTrue(session.isCompleted("n1"))
+            assertTrue(session.isCompleted("n1") && session.isCompleted("n2"))
+            assertEquals(listOf("n1", "n2"), session.completedUnacknowledgedTurnIds)
         }
     }
 
@@ -126,7 +131,7 @@ class LlmTransportTest
     }
 
     @Test
-    fun `HTTP and terminal SSE failures never execute tools save images or advance chain`() = runBlocking {
+    fun `HTTP and terminal SSE failures finish the batch once without executing tools or advancing chain`() = runBlocking {
         for (kind in listOf("429", "503", "failed", "incomplete", "missing-id"))
         {
             val calls = mutableListOf<String>()
@@ -157,27 +162,49 @@ class LlmTransportTest
                 assertTrue(calls.isEmpty(), kind)
                 assertEquals(0, saved, kind)
                 assertEquals("resp_before", session.state.previousResponseId, kind)
-                assertFalse(session.isCompleted("failed-turn"))
+                assertTrue(session.isCompleted("failed-turn"))
+                assertEquals(listOf("failed-turn"), session.completedUnacknowledgedTurnIds)
+                assertNull(session.pendingTurnId)
+                assertEquals(1, server.requests.size, "$kind must not retry")
+                assertEquals(1, session.state.deferredInput.size)
+                assertTrue(session.state.deferredInput.all { it["role"] == JsonPrimitive("developer") })
             }
         }
     }
 
     @Test
-    fun `successful HTTP retry does not carry the previous failure`() = runBlocking {
-        MockServer { index, _ ->
+    fun `HTTP error drops its batch without retry and a new batch can succeed`() = runBlocking {
+        val session = ResponsesSession()
+        MockServer { index, request ->
             if (index == 0) MockResponse(json("""{"error":{"message":"temporarily unavailable"}}"""), status = 503)
-            else MockResponse(completed("resp_retry", listOf(message("Recovered"))))
+            else {
+                assertEquals(1, index)
+                assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
+                assertTrue(request.input().first()["role"] == JsonPrimitive("developer"))
+                MockResponse(completed("resp_next", listOf(message("Handled new notification"))))
+            }
         }.use { server ->
-            val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Retry"), stream = false) }
+            val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Drop this"),
+                session = session, turnId = "failed", stream = false) }
+            assertIs<AiResult.ServiceError>(failed)
+            assertEquals(1, server.requests.size)
+            val duplicate = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Never resubmit"),
+                session = session, turnId = "failed", stream = false) }
+            assertIs<AiResult.Success>(duplicate)
+            assertEquals(1, server.requests.size)
+            val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "New notification"),
+                session = session, turnId = "new", stream = false) }
             server.verify()
             assertIs<AiResult.Success>(result)
-            assertEquals("Recovered", result.messages.single().content.toText())
+            assertEquals("Handled new notification", result.messages.single().content.toText())
             assertEquals(2, server.requests.size)
+            assertTrue(session.isCompleted("failed") && session.isCompleted("new"))
+            assertTrue(session.state.deferredInput.isEmpty())
         }
     }
 
     @Test
-    fun `interrupted stream resumes by GET after restart without submitting the user input twice`() = runBlocking {
+    fun `explicit cancellation after created resumes by GET after restart without resubmitting user input`() = runBlocking {
         withSessionFile { file ->
             val calls = mutableListOf<String>()
             MockServer { index, request ->
@@ -185,7 +212,7 @@ class LlmTransportTest
                 {
                     0 -> {
                         assertCommonRequest(request, null)
-                        MockResponse.sse(created("resp_interrupted"), delta("response.output_text.delta", "Partial"))
+                        MockResponse.sse(created("resp_interrupted"), delta("response.reasoning_summary_text.delta", "Partial"))
                     }
                     1 -> {
                         assertEquals("GET", request.method)
@@ -202,10 +229,12 @@ class LlmTransportTest
             }.use { server ->
                 val first = ResponsesSession(file, "account-a")
                 val interrupted = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Original notification"),
-                    instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = first, turnId = "n1") }
-                assertIs<AiResult.UnknownError>(interrupted)
+                    instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = first, turnId = "n1",
+                    onReceive = { throw CancellationException("Test explicit cancellation") }) }
+                assertIs<AiResult.Cancelled>(interrupted)
                 assertTrue(calls.isEmpty())
                 val restarted = ResponsesSession(file, "account-a")
+                assertFalse(restarted.isCompleted("n1"))
                 assertEquals("resp_interrupted", restarted.state.turn?.responseId)
                 assertNull(restarted.state.previousResponseId)
                 val resumed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Do not resend this"),
@@ -282,7 +311,8 @@ class LlmTransportTest
         withSessionFile { file ->
             val seed = ResponsesSession(file, "account-a")
             seed.update(seed.state.copy(previousResponseId = "resp_before", turn = PendingTurn("n1", listOf(userInput("Original")),
-                responseId = "resp_tools", toolResults = mapOf("call_a" to toolOutput("call_a", "echo:A")))))
+                responseId = "resp_tools", toolResults = mapOf("call_a" to toolOutput("call_a", "echo:A")),
+                toolCallIds = listOf("call_a", "call_b"))))
             val calls = mutableListOf<String>()
             MockServer { index, request ->
                 when (index)
@@ -311,109 +341,256 @@ class LlmTransportTest
     }
 
     @Test
-    fun `uncertain in-flight tool checkpoint blocks all automatic requests and tool execution`() = runBlocking {
+    fun `uncertain in-flight checkpoint fails its old batch without requests and allows a new batch`() = runBlocking {
         withSessionFile { file ->
             val seed = ResponsesSession(file, "account-a")
             seed.update(seed.state.copy(previousResponseId = "resp_before", turn = PendingTurn("n1", listOf(userInput("Original")),
-                responseId = "resp_tools", executingToolId = "call_uncertain")))
-            val before = file.readText()
+                responseId = "resp_tools", executingToolId = "call_uncertain", toolCallIds = listOf("call_uncertain"))))
             val calls = mutableListOf<String>()
-            MockServer { _, _ -> error("An uncertain tool must block HTTP requests") }.use { server ->
-                val result = bounded { sendAiRequest(server.model(), ChatMessages.empty(), tools = listOf(echoTool(calls)),
-                    session = ResponsesSession(file, "account-a"), turnId = "n1", stream = false) }
-                server.verify()
-                assertIs<AiResult.UnknownError>(result)
-                assertTrue(result.error.message.orEmpty().contains("call_uncertain"))
+            MockServer { index, request ->
+                assertEquals(0, index)
+                assertCommonRequest(request, "resp_tools")
+                assertEquals(listOf("call_uncertain"), request.input().filter { it["type"] == JsonPrimitive("function_call_output") }
+                    .map { it.getValue("call_id").jsonPrimitive.content })
+                assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
+                MockResponse(completed("resp_new", listOf(message("New batch complete"))))
+            }.use { server ->
+                val session = ResponsesSession(file, "account-a")
+                val failed = bounded { sendAiRequest(server.model(), ChatMessages.empty(), tools = listOf(echoTool(calls)),
+                    session = session, turnId = "n1", stream = false) }
+                assertIs<AiResult.UnknownError>(failed)
+                assertTrue(failed.error.message.orEmpty().contains("call_uncertain"))
                 assertTrue(server.requests.isEmpty())
                 assertTrue(calls.isEmpty())
-                assertEquals(before, file.readText())
+                val restarted = ResponsesSession(file, "account-a")
+                assertNull(restarted.pendingTurnId)
+                assertTrue(restarted.isCompleted("n1"))
+                assertEquals("resp_tools", restarted.state.previousResponseId)
+                val duplicate = bounded { sendAiRequest(server.model(), ChatMessages.empty(), session = restarted, turnId = "n1", stream = false) }
+                assertIs<AiResult.Success>(duplicate)
+                assertTrue(server.requests.isEmpty())
+                val next = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "New notification"), instructions = INSTRUCTIONS,
+                    session = restarted, turnId = "n2", stream = false) }
+                server.verify()
+                assertIs<AiResult.Success>(next)
+                assertTrue(calls.isEmpty())
+                assertEquals(1, server.requests.size)
             }
         }
     }
 
     @Test
-    fun `uncertain remote write failure persists an execution checkpoint and cannot replay after restart`() = runBlocking {
-        withSessionFile { file ->
-            var executions = 0
-            val writeTool = AiToolInfo<TextArgs>("write_post", "Test remote write", "Write") { _, _ ->
-                executions++
-                throw UncertainToolExecutionException("Write may have succeeded", java.io.IOException("Connection lost after write"))
-            }
+    fun `partial tool success and ordinary or uncertain failure continue later with all outputs without replay`() = runBlocking {
+        for (uncertain in listOf(false, true)) withSessionFile { file ->
+            val executions = mutableListOf<String>()
+            val tools = listOf(
+                echoTool(executions),
+                AiToolInfo<TextArgs>("write_post", "Test remote write", "Write") { _, _ ->
+                    executions += "failed write"
+                    if (uncertain)
+                        throw UncertainToolExecutionException("Write may have succeeded", java.io.IOException("Connection lost after write"))
+                    else throw java.io.IOException("Fixture tool execution failed")
+                },
+            )
             MockServer { index, request ->
-                assertEquals(0, index, "Restart must not retrieve or submit another response")
-                assertCommonRequest(request, "resp_before")
-                MockResponse(completed("resp_write", listOf(call("call_write", "write_post", "post once"))))
+                assertCommonRequest(request, if (index == 0) "resp_before" else "resp_write")
+                when (index)
+                {
+                    0 -> MockResponse(completed("resp_write", listOf(call("call_saved", "echo", "saved"),
+                        call("call_write", "write_post", "post once"), call("call_unexecuted", "echo", "must not run"))))
+                    1 -> {
+                        val input = request.input()
+                        val outputs = input.filter { it["type"] == JsonPrimitive("function_call_output") }
+                        assertEquals(listOf("call_saved", "call_write", "call_unexecuted"), outputs.map { it.getValue("call_id").jsonPrimitive.content })
+                        assertEquals(toolOutput("call_saved", "echo:saved"), outputs.first())
+                        assertTrue(outputs.drop(1).all { it.getValue("output").jsonPrimitive.content.isNotBlank() })
+                        assertEquals(listOf(userInput("Next batch")), input.filter { it["role"] == JsonPrimitive("user") })
+                        assertTrue(input.any { it["role"] == JsonPrimitive("developer") })
+                        assertEquals(userInput("Next batch"), input.last())
+                        MockResponse(completed("resp_next", listOf(message("Next batch done"))))
+                    }
+                    else -> error("No failed batch or executed tool may be replayed")
+                }
             }.use { server ->
                 val session = ResponsesSession(file, "account-a")
                 session.update(session.state.copy(previousResponseId = "resp_before"))
                 val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Write a post"),
-                    instructions = INSTRUCTIONS, tools = listOf(writeTool), session = session, turnId = "write-turn", stream = false) }
+                    instructions = INSTRUCTIONS, tools = tools, session = session, turnId = "batch-failed",
+                    deliveryIds = listOf("n1", "n2"), stream = false) }
                 assertIs<AiResult.UnknownError>(failed)
-                assertIs<UncertainToolExecutionException>(failed.error)
-                assertEquals(1, executions)
-
+                if (uncertain) assertIs<UncertainToolExecutionException>(failed.error)
+                else assertIs<java.io.IOException>(failed.error)
+                assertEquals(listOf("saved", "failed write"), executions)
                 val restarted = ResponsesSession(file, "account-a")
-                assertEquals("call_write", restarted.state.turn?.executingToolId)
-                assertEquals("resp_write", restarted.state.turn?.responseId)
-                assertEquals("resp_before", restarted.state.previousResponseId)
-                assertTrue(restarted.state.turn!!.toolResults.isEmpty())
-                assertFalse(restarted.isCompleted("write-turn"))
-                val checkpoint = file.readText()
-                val blocked = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Do not repeat"),
-                    instructions = INSTRUCTIONS, tools = listOf(writeTool), session = restarted, turnId = "write-turn", stream = false) }
-                server.verify()
-                assertIs<AiResult.UnknownError>(blocked)
-                assertTrue(blocked.error.message.orEmpty().contains("call_write"))
+                assertNull(restarted.pendingTurnId)
+                assertEquals("resp_write", restarted.state.previousResponseId)
+                assertTrue(restarted.isCompleted("n1") && restarted.isCompleted("n2"))
+                assertEquals(listOf("n1", "n2"), restarted.completedUnacknowledgedTurnIds)
+                val duplicate = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Never repeat"),
+                    instructions = INSTRUCTIONS, tools = tools, session = restarted, turnId = "batch-failed",
+                    deliveryIds = listOf("n1", "n2"), stream = false) }
+                assertIs<AiResult.Success>(duplicate)
                 assertEquals(1, server.requests.size)
-                assertEquals(1, executions)
-                assertEquals(checkpoint, file.readText())
+                val next = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Next batch"),
+                    instructions = INSTRUCTIONS, tools = tools, session = restarted, turnId = "batch-new",
+                    deliveryIds = listOf("n3"), stream = false) }
+                server.verify()
+                assertIs<AiResult.Success>(next)
+                assertEquals(listOf("saved", "failed write"), executions)
+                assertEquals(2, server.requests.size)
+                assertTrue(restarted.state.deferredInput.isEmpty())
             }
         }
     }
 
     @Test
-    fun `failed and incomplete branches restart from last good id with the original pending input`() = runBlocking {
-        for (status in listOf("failed", "incomplete")) for (stream in listOf(false, true))
+    fun `completed response with still generating image drops the entire batch and never dispatches its post`() = runBlocking {
+        for (stream in listOf(false, true)) withSessionFile { file ->
+            val posts = mutableListOf<String>()
+            var saved = 0
+            MockServer { index, request ->
+                assertCommonRequest(request, "resp_before")
+                when (index)
+                {
+                    0 -> {
+                        val response = completed("resp_invalid_image", listOf(
+                            json("""{"type":"image_generation_call","id":"ig_pending","status":"generating"}"""),
+                            call("call_post", "send_post", "must not post")))
+                        if (stream) MockResponse.sse(created("resp_invalid_image"), terminal(response)) else MockResponse(response)
+                    }
+                    1 -> {
+                        assertEquals(listOf(userInput("Only new notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
+                        assertFalse(request.input().any { it["type"] == JsonPrimitive("function_call_output") })
+                        assertTrue(request.input().any { it["role"] == JsonPrimitive("developer") })
+                        MockResponse(completed("resp_new", listOf(message("New notification handled"))))
+                    }
+                    else -> error("Invalid completed response must never be polled or resubmitted")
+                }
+            }.use { server ->
+                val session = ResponsesSession(file, "account-a")
+                session.update(session.state.copy(previousResponseId = "resp_before"))
+                val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Old combined notification batch"),
+                    instructions = INSTRUCTIONS, tools = listOf(textTool("send_post") { posts += it; "posted" }),
+                    session = session, turnId = "batch-invalid", deliveryIds = listOf("n1", "n2"), stream = stream,
+                    onGeneratedImage = { saved++; "unexpected asset" }) }
+                assertIs<AiResult.UnknownError>(failed)
+                assertTrue(posts.isEmpty())
+                assertEquals(0, saved)
+                val restarted = ResponsesSession(file, "account-a")
+                assertNull(restarted.pendingTurnId)
+                assertEquals("resp_before", restarted.state.previousResponseId)
+                assertTrue(restarted.isCompleted("n1") && restarted.isCompleted("n2"))
+                val duplicate = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Duplicate old batch"),
+                    session = restarted, turnId = "batch-invalid", deliveryIds = listOf("n1", "n2"), stream = false) }
+                assertIs<AiResult.Success>(duplicate)
+                assertEquals(1, server.requests.size)
+                val next = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Only new notification"),
+                    instructions = INSTRUCTIONS, session = restarted, turnId = "batch-next", deliveryIds = listOf("n3"), stream = false) }
+                server.verify()
+                assertIs<AiResult.Success>(next)
+                assertEquals(listOf("POST", "POST"), server.requests.map { it.method })
+                assertTrue(posts.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `failed incomplete and truncated responses discard old input and continue new batches from last good id`() = runBlocking {
+        for (status in listOf("failed", "incomplete", "truncated")) for (stream in listOf(false, true))
         {
+            if (status == "truncated" && !stream) continue
             withSessionFile { file ->
                 val calls = mutableListOf<String>()
                 var saved = 0
                 MockServer { index, request ->
                     assertCommonRequest(request, "resp_before")
-                    assertEquals(listOf(userInput("Original notification")), request.input())
                     when (index)
                     {
                         0 -> {
+                            assertEquals(listOf(userInput("Old notification")), request.input())
                             val failed = JsonObject(completed("resp_failed", listOf(call("call_discard", "echo", "discard"), image())) +
                                 ("status" to JsonPrimitive(status)))
-                            if (stream) MockResponse.sse(created("resp_failed"), terminal(failed, "response.$status"))
+                            if (status == "truncated") MockResponse.sse(created("resp_failed"), delta("response.reasoning_summary_text.delta", "Partial"))
+                            else if (stream) MockResponse.sse(created("resp_failed"), terminal(failed, "response.$status"))
                             else MockResponse(failed)
                         }
-                        1 -> MockResponse(completed("resp_retried", listOf(message("Completed retry"))))
+                        1 -> {
+                            assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
+                            assertTrue(request.input().any { it["role"] == JsonPrimitive("developer") })
+                            MockResponse(completed("resp_new", listOf(message("New batch complete"))))
+                        }
                         else -> error("Unexpected request $index")
                     }
                 }.use { server ->
                     val first = ResponsesSession(file, "account-a")
                     first.update(first.state.copy(previousResponseId = "resp_before"))
-                    val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Original notification"),
+                    val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Old notification"),
                         instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = first, turnId = "n1", stream = stream,
                         onGeneratedImage = { saved++; "unexpected image receipt" }) }
                     assertIs<AiResult.UnknownError>(failed, "$status stream=$stream")
                     val restarted = ResponsesSession(file, "account-a")
-                    assertNull(restarted.state.turn?.responseId, "$status stream=$stream")
+                    assertNull(restarted.pendingTurnId)
                     assertEquals("resp_before", restarted.state.previousResponseId)
-                    assertEquals(listOf(userInput("Original notification")), restarted.state.turn?.input)
-                    assertFalse(restarted.isCompleted("n1"))
-                    val retried = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Replacement input must be ignored"),
-                        instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = restarted, turnId = "n1", stream = false) }
+                    assertTrue(restarted.isCompleted("n1"))
+                    val duplicate = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Never repeat"),
+                        session = restarted, turnId = "n1", stream = false) }
+                    assertIs<AiResult.Success>(duplicate)
+                    assertEquals(1, server.requests.size)
+                    val next = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "New notification"),
+                        instructions = INSTRUCTIONS, tools = listOf(echoTool(calls)), session = restarted, turnId = "n2", stream = false) }
                     server.verify()
-                    assertIs<AiResult.Success>(retried)
+                    assertIs<AiResult.Success>(next)
                     assertTrue(calls.isEmpty())
                     assertEquals(0, saved)
                     assertEquals(listOf("POST", "POST"), server.requests.map { it.method })
-                    assertEquals("resp_retried", restarted.state.previousResponseId)
-                    assertTrue(restarted.isCompleted("n1"))
+                    assertEquals("resp_new", restarted.state.previousResponseId)
+                    assertTrue(restarted.isCompleted("n2"))
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `real read_image download and decode failures discard the batch without model continuation or delivery retry`() = runBlocking {
+        for (download in listOf(false, true)) withSessionFile { file ->
+            var imageUrl = "data:image/png;base64,%%%invalid%%%"
+            MockServer { index, request ->
+                when (index)
+                {
+                    0 -> {
+                        assertCommonRequest(request, null)
+                        val readImage = JsonObject(call("call_image", "read_image", "") +
+                            ("arguments" to JsonPrimitive(buildJsonObject { putJsonArray("urls") { add(imageUrl) } }.toString())))
+                        MockResponse(completed("resp_read_image", listOf(readImage)))
+                    }
+                    1 -> {
+                        assertTrue(download, "Invalid base64 must fail locally")
+                        assertEquals("GET", request.method)
+                        assertEquals("/missing-image.png", request.path)
+                        MockResponse("missing image", status = 404, contentType = "text/plain")
+                    }
+                    else -> error("read_image failure must not continue the model or retry its download")
+                }
+            }.use { server ->
+                val model = server.model().copy(visible = true)
+                if (download) imageUrl = model.url.removeSuffix("/v1/responses") + "/missing-image.png"
+                val tools = AiToolSet(ReadImage()).getTools(null, model)
+                assertEquals(listOf("read_image"), tools.map { it.name })
+                val session = ResponsesSession(file, "account-a")
+                val failed = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Read this image"), instructions = INSTRUCTIONS,
+                    tools = tools, session = session, turnId = "image-batch", deliveryIds = listOf("n1", "n2"), stream = false) }
+                assertIs<AiResult.UnknownError>(failed)
+                assertIs<IllegalArgumentException>(failed.error)
+                if (download) assertTrue(failed.error.message.orEmpty().contains("404"))
+                val restored = ResponsesSession(file, "account-a")
+                assertNull(restored.pendingTurnId)
+                assertTrue(restored.isCompleted("n1") && restored.isCompleted("n2"))
+                val duplicate = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Do not retry failed image"),
+                    tools = tools, session = restored, turnId = "image-batch", deliveryIds = listOf("n1", "n2"), stream = false) }
+                server.verify()
+                assertIs<AiResult.Success>(duplicate)
+                assertTrue(duplicate.messages.isEmpty())
+                assertEquals(if (download) listOf("POST", "GET") else listOf("POST"), server.requests.map { it.method })
             }
         }
     }

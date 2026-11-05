@@ -42,6 +42,9 @@ class GeneratedImageStore(private val directory: File)
     }
 
     @Synchronized
+    fun contains(id: String): Boolean = imageFiles(hashId(id)).isNotEmpty()
+
+    @Synchronized
     fun read(id: String): Image
     {
         val hash = hashId(id)

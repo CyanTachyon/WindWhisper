@@ -10,8 +10,6 @@ import java.net.URI
 data class AiConfig(
     @YamlComment("超时时间（毫秒）：非流式请求/恢复GET为总时限；流式请求为无新事件的最长等待时间，包含等待响应头")
     val timeout: Long = 2 * 60 * 1_000,
-    @YamlComment("AI服务的重试次数")
-    val retry: Int = 3,
     val model: LlmModel = LlmModel(),
 )
 {
@@ -48,27 +46,9 @@ data class AiConfig(
         }
     }
 
-    @Serializable
-    data class Model(
-        val url: String = "your embedding/reranker url",
-        val model: String = "your embedding/reranker model",
-        val maxConcurrency: Int = 50,
-        val key: List<String> = listOf("your api key"),
-    )
-    {
-        val semaphore by lazy { Semaphore(maxConcurrency) }
-
-        init
-        {
-            require(maxConcurrency > 0) { "maxConcurrency must be greater than 0" }
-            require(key.isNotEmpty()) { "embedding key must not be empty" }
-        }
-    }
-
     init
     {
         require(timeout > 0) { "timeout must be greater than 0" }
-        require(retry > 0) { "retry must be greater than 0" }
     }
 }
 

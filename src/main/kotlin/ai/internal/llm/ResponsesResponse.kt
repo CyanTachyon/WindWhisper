@@ -12,6 +12,18 @@ import java.net.URI
 /** A completed image returned by the Responses image-generation tool. */
 data class GeneratedImage(val id: String, val base64: String, val format: String = "png")
 
+internal class ResponsesImageGenerationFailedException(
+    val imageId: String,
+    val code: String?,
+    detail: String?,
+): Exception("Responses API 内置图片生成失败 (id=$imageId${code?.let { ", code=$it" }.orEmpty()}): " +
+    (detail?.takeIf { it.isNotBlank() } ?: "服务端未提供错误详情"))
+
+internal class ResponsesImageGenerationStateException(
+    val imageId: String,
+    val imageStatus: String,
+): Exception("Responses API 顶层响应已 completed，但 image_generation_call 仍处于 $imageStatus (id=$imageId)，终态不一致")
+
 /** Decode the wire response, rather than the SDK-only output_text convenience property. */
 internal fun parseResponsesResponse(response: JsonObject): RequestResult
 {
@@ -22,6 +34,7 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
     val images = linkedMapOf<String, GeneratedImage>()
     var hasCompaction = false
     var formatError: String? = null
+    var imageError: Throwable? = null
 
     output.forEach { item ->
         when (item.string("type"))
@@ -55,14 +68,25 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
             "image_generation_call" ->
             {
                 val id = item.string("id")
+                val status = item.string("status")
                 val result = item.string("result")
                 val format = if ("output_format" in item) item.string("output_format") else "png"
                 when
                 {
-                    item.string("status") != "completed" ->
-                        formatError = "image_generation_call 尚未完成"
-                    id.isNullOrBlank() || result.isNullOrBlank() ->
-                        formatError = "image_generation_call 缺少 id 或 result"
+                    id.isNullOrBlank() -> formatError = "image_generation_call 缺少 id"
+                    status == "failed" ->
+                    {
+                        // This is a valid terminal tool failure. A missing image result is expected;
+                        // polling the same completed response cannot turn it into a successful image.
+                        val failure = item["error"] as? JsonObject
+                        imageError = imageError ?: ResponsesImageGenerationFailedException(
+                            id, failure?.string("code"), failure?.string("message"))
+                    }
+                    (status == "in_progress" || status == "generating") && response.string("status") == "completed" ->
+                        imageError = imageError ?: ResponsesImageGenerationStateException(id, status)
+                    status != "completed" ->
+                        formatError = "image_generation_call 状态不是 completed: ${status ?: "missing status"}"
+                    result.isNullOrBlank() -> formatError = "completed image_generation_call 缺少 result"
                     format == null || format !in setOf("png", "jpeg", "webp") ->
                         formatError = "image_generation_call 的 output_format 必须是 png、jpeg 或 webp"
                     id in images -> formatError = "image_generation_call 包含重复的 id"
@@ -85,6 +109,7 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
             "Responses API 响应未完成: ${(response["incomplete_details"] as? JsonObject)?.string("reason") ?: "unknown"}")
         response.string("status") != "completed" -> UnknownAiResponseException(message =
             "Responses API 响应状态异常: ${response.string("status") ?: "missing status"}")
+        imageError != null -> imageError
         formatError != null -> UnknownAiResponseException(message = "Responses API 响应格式无效: $formatError")
         response["output"] !is JsonArray || output.size != (response["output"] as JsonArray).size ->
             UnknownAiResponseException(message = "Responses API 响应格式无效: output 必须是对象数组")

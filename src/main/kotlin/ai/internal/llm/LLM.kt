@@ -82,6 +82,7 @@ suspend fun sendAiRequest(
     session: ResponsesSession = ResponsesSession(),
     turnId: String = java.util.UUID.randomUUID().toString(),
     stream: Boolean = true,
+    deliveryIds: List<String> = listOf(turnId),
     onGeneratedImage: (suspend (GeneratedImage) -> String)? = null,
     onReceive: suspend (StreamAiResponseSlice) -> Unit = {},
 ): AiResult = session.mutex.withLock {
@@ -90,68 +91,47 @@ suspend fun sendAiRequest(
         var usage = TokenUsage()
         try
         {
-            if (!session.begin(turnId, messages.toResponsesInput()))
+            if (!session.begin(turnId, messages.toResponsesInput(), deliveryIds))
                 return@withPermit AiResult.Success(ChatMessages.empty(), usage)
             // A crash between a forum write and its checkpoint is ambiguous. Do not replay it.
             check(session.state.turn!!.executingToolId == null) {
                 "A tool was interrupted before its result was saved (${session.state.turn!!.executingToolId}). " +
-                    "Check the forum and session checkpoint before resuming; the tool will not be replayed automatically."
+                    "This batch will be discarded without replaying the tool; check the forum for its actual result."
             }
             while (true)
             {
                 currentCoroutineContext().ensureActive()
                 val turn = session.state.turn!!
                 val body = buildResponsesRequest(model, turn.input, instructions, session.state.previousResponseId, tools, stream)
-                val errors = mutableListOf<Throwable>()
-                var result: RequestResult? = null
-                for (attempt in 0 until aiConfig.retry)
+                val pendingId = session.state.turn!!.responseId
+                val requestDescription = "${if (pendingId != null) "GET" else "POST"} " +
+                    "turn=${safeLogValue(turnId)} model=${safeLogValue(model.model)}"
+                logger.fine("Responses API request started: $requestDescription")
+                val completed = withResponsesWaitingLog(requestDescription)
                 {
-                    val pendingId = session.state.turn!!.responseId
-                    val requestDescription = "${if (pendingId != null) "GET" else "POST"} " +
-                        "turn=${safeLogValue(turnId)} attempt=${attempt + 1}/${aiConfig.retry} model=${safeLogValue(model.model)}"
-                    logger.fine("Responses API request started: $requestDescription")
-                    val received = withResponsesWaitingLog(requestDescription) {
-                        if (pendingId != null) retrieveResponse(model, pendingId)
-                        else sendResponsesRequest(model.url, model.key.first(), body, stream, onReceive) { id ->
-                            session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = id)))
-                            logger.fine("Responses API response created: $requestDescription response=${safeLogValue(id)}")
-                        }
+                    if (pendingId != null) retrieveResponse(model, pendingId)
+                    else sendResponsesRequest(model.url, model.key.first(), body, stream, onReceive) { id ->
+                        session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = id)))
+                        logger.fine("Responses API response created: $requestDescription response=${safeLogValue(id)}")
                     }
-                    if (received.error is CancellationException)
-                    {
-                        logger.fine("Responses API request cancelled: $requestDescription")
-                        throw received.error!!
-                    }
-                    if (received.error == null)
-                    {
-                        logger.fine("Responses API request completed: $requestDescription response=${safeLogValue(received.responseId.orEmpty())}")
-                        result = received
-                        break
-                    }
-                    logger.warning("Responses API request failed: $requestDescription reason=${safeRequestFailure(received.error!!)}")
-                    errors += received.error!!
-                    if (received.responseStatus in setOf("failed", "incomplete", "cancelled") &&
-                        session.state.turn!!.toolResults.isEmpty() && session.state.turn!!.imageNotices.isEmpty())
-                    {
-                        // This response produced no application side effects. Retry the same
-                        // pending input from the last completed response, not its failed branch.
-                        session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = null)))
-                        throw received.error!!
-                    }
-                    if (pendingId != null || session.state.turn!!.responseId != null || !received.message.isBlank())
-                        throw received.error!!
-                    // Invalid requests and missing server state cannot be repaired by repeating.
-                    if (received.error!!.httpStatus() in 400..499 && received.error!!.httpStatus() != 429)
-                        throw received.error!!
-                    if (attempt + 1 < aiConfig.retry)
-                        logger.info("Responses API retry scheduled: turn=${safeLogValue(turnId)} nextAttempt=${attempt + 2}/${aiConfig.retry}")
                 }
-                val completed = result ?: throw AiRetryFailedException(errors.map(::UnknownAiResponseException))
+                if (completed.error is CancellationException)
+                {
+                    logger.fine("Responses API request cancelled: $requestDescription")
+                    throw completed.error!!
+                }
+                if (completed.error != null)
+                {
+                    logger.warning("Responses API request failed; discarding batch: $requestDescription reason=${safeRequestFailure(completed.error!!)}")
+                    throw completed.error!!
+                }
+                logger.fine("Responses API request completed: $requestDescription response=${safeLogValue(completed.responseId.orEmpty())}")
                 val responseId = completed.responseId?.takeIf { it.isNotBlank() }
                     ?: error("Responses API completed response is missing its id")
-                val pendingId = session.state.turn!!.responseId
-                check(pendingId == null || pendingId == responseId) { "Responses API returned an unexpected response id" }
-                session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = responseId)))
+                val savedId = session.state.turn!!.responseId
+                check(savedId == null || savedId == responseId) { "Responses API returned an unexpected response id" }
+                session.update(session.state.copy(turn = session.state.turn!!.copy(
+                    responseId = responseId, toolCallIds = completed.toolCalls.keys.toList())))
                 usage += completed.usage
                 val compactionItems = completed.message.responsesOutput.count { it["type"] == JsonPrimitive("compaction") }
                 if (compactionItems > 0)
@@ -192,12 +172,14 @@ suspend fun sendAiRequest(
                     break
                 }
                 session.update(session.state.copy(previousResponseId = responseId,
-                    turn = PendingTurn(turnId, nextInput)))
+                    turn = PendingTurn(turnId, nextInput, deliveryIds = pending.deliveryIds)))
             }
             AiResult.Success(res.toChatMessages(), usage)
         }
         catch (error: Throwable)
         {
+            if (error !is CancellationException && session.state.turn?.id == turnId)
+                session.failPendingTurn()
             when
             {
                 error is CancellationException -> AiResult.Cancelled(res.toChatMessages(), usage)
@@ -225,7 +207,6 @@ private fun Throwable.httpStatus(): Int? = when (this)
 {
     is AiHttpException -> status
     is SSEClientException -> response?.status?.value
-    is AiRetryFailedException -> exceptions.lastOrNull()?.httpStatus()
     else -> cause?.takeUnless { it === this }?.httpStatus()
 }
 
@@ -380,34 +361,18 @@ suspend fun parseToolCalls(
     return waitingTools.flatMap()
     { (id, t) ->
         val (toolName, parm) = t
-        val tool = tools.firstOrNull { it.name == toolName } ?: return@flatMap run()
-        {
-            ChatMessages(
-                role = Role.TOOL(id, toolName),
-                content = "error: 工具$toolName 并不存在，请确认你调用的工具名称正确且存在",
-            )
-        }
+        val tool = tools.firstOrNull { it.name == toolName }
+            ?: error("Requested tool does not exist: $toolName")
 
         logger.warning("fail to put toolcall message")
         {
             onReceive(StreamAiResponseSlice.ToolCall(id, tool, parm))
         }
 
-        val data: Any
-        try
-        {
-            data = tool.parse(parm)
-        }
-        catch (e: Throwable)
-        {
-            return@flatMap ChatMessages(
-                Role.TOOL(id, toolName),
-                "错误！你调用工具 $toolName 时传入的参数格式错误，请检查参数是否符合要求，并改正错误后重试。\n具体错误为：\n${e.message}",
-            )
-        }
+        val data: Any = tool.parse(parm)
 
         var toolReasoning = Content()
-        val content = try
+        val content = run()
         {
             logger.config("Calling tool $toolName with parameters $parm")
             @Suppress("UNCHECKED_CAST")
@@ -419,16 +384,6 @@ suspend fun parseToolCalls(
                     onReceive(StreamAiResponseSlice.ToolMessage(id, it))
                 }
             }
-        }
-        catch (e: Throwable)
-        {
-            if (e is CancellationException || e is UncertainToolExecutionException) throw e
-            logger.warning("Tool call failed for $toolName with parameters $parm", e)
-            return@flatMap ChatMessages(
-                role = Role.TOOL(id, toolName),
-                content = Content("error: \n${e.stackTraceToString()}"),
-                reasoningContent = toolReasoning,
-            )
         }
         val toolCall = ChatMessage(
             role = Role.TOOL(id, toolName),

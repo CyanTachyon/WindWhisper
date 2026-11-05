@@ -3,11 +3,10 @@ package moe.tachyon.windwhisper.ai.tools
 import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.http.isSuccess
-import io.ktor.util.*
-import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import moe.tachyon.windwhisper.ai.*
 import moe.tachyon.windwhisper.utils.*
+import java.util.Base64
 import kotlin.math.sqrt
 
 class ReadImage: AiToolSet.ToolProvider<Any?>
@@ -17,37 +16,32 @@ class ReadImage: AiToolSet.ToolProvider<Any?>
     @Serializable
     private data class SimpleParm(val urls: List<String>)
 
-    private suspend fun List<String>.urlsToContent(): Either<List<ContentNode>, String> = runCatching()
+    private suspend fun List<String>.urlsToContent(): List<ContentNode> = buildList()
     {
-        buildList<ContentNode> {
-            for (url in this@urlsToContent)
-            {
-                val bytes =
-                    if (url.startsWith("data:")) url.substringAfter(",").decodeBase64Bytes()
-                    else downloadHttpClient.get(url).let { response ->
-                        require(response.status.isSuccess()) { "图片/PDF下载失败，HTTP状态码：${response.status.value}" }
-                        response.body<ByteArray>()
-                    }
-                val images = DocumentConversion.documentToImages(bytes)
-                    ?: error("不支持的图片/PDF格式，URL：$url")
-                for (img in images)
-                {
-                    val totalPixels = img.width.toLong() * img.height.toLong()
-                    val resized = if (totalPixels > 10_000_000)
-                    {
-                        val scale = sqrt(10_000_000.0 / totalPixels.toDouble())
-                        val newWidth = (img.width * scale).toInt().coerceAtLeast(1)
-                        val newHeight = (img.height * scale).toInt().coerceAtLeast(1)
-                        img.resize(newWidth, newHeight)
-                    }
-                    else img
-                    add(ContentNode.image("data:image/jpeg;base64," + resized.toJpegBytes().encodeBase64()))
+        for (url in this@urlsToContent)
+        {
+            val bytes =
+                if (url.startsWith("data:")) Base64.getDecoder().decode(url.substringAfter(","))
+                else downloadHttpClient.get(url).let { response ->
+                    require(response.status.isSuccess()) { "图片/PDF下载失败，HTTP状态码：${response.status.value}" }
+                    response.body<ByteArray>()
                 }
+            val images = DocumentConversion.documentToImages(bytes)
+                ?: error("不支持的图片/PDF格式，URL：$url")
+            for (img in images)
+            {
+                val totalPixels = img.width.toLong() * img.height.toLong()
+                val resized = if (totalPixels > 10_000_000)
+                {
+                    val scale = sqrt(10_000_000.0 / totalPixels.toDouble())
+                    val newWidth = (img.width * scale).toInt().coerceAtLeast(1)
+                    val newHeight = (img.height * scale).toInt().coerceAtLeast(1)
+                    img.resize(newWidth, newHeight)
+                }
+                else img
+                add(ContentNode.image("data:image/jpeg;base64," + Base64.getEncoder().encodeToString(resized.toJpegBytes())))
             }
-        }.let { Either.Left(it) }
-    }.getOrElse {
-        if (it is CancellationException) throw it
-        Either.Right(it.message ?: "未知错误")
+        }
     }
 
     override suspend fun <S> AiToolSet<S>.registerTools()
@@ -65,7 +59,7 @@ class ReadImage: AiToolSet.ToolProvider<Any?>
             condition = { _, model -> model?.visible == true },
         )
         {
-            AiToolInfo.ToolResult(Content(parm.urls.urlsToContent().leftOrElse { listOf(ContentNode.text(it)) }))
+            AiToolInfo.ToolResult(Content(parm.urls.urlsToContent()))
         }
 
     }

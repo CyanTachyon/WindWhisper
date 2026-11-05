@@ -1,5 +1,6 @@
 package moe.tachyon.windwhisper
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
@@ -111,14 +112,15 @@ class MessagePrinter(
 
 private val logger = WindWhisperLogger.getLogger()
 
-/** Process the API's newest-first notification list without acknowledging unfinished turns. */
+/** Deliver each poll as one batch and acknowledge terminal failures without repeating their work. */
 internal suspend fun processNotifications(
     notifications: List<UnreadNotification>,
     pendingTurnId: String?,
     isCompleted: (String) -> Boolean,
-    process: suspend (turnId: String, notification: UnreadNotification?) -> Boolean,
+    process: suspend (turnId: String, notifications: List<UnreadNotification>?) -> Boolean,
     acknowledge: suspend (notificationId: Long) -> Boolean,
     completedUnacknowledgedTurnIds: List<String> = emptyList(),
+    pendingDeliveryIds: List<String> = emptyList(),
 ): Boolean
 {
     fun notificationId(turnId: String): Long
@@ -127,45 +129,62 @@ internal suspend fun processNotifications(
         return turnId.removePrefix("notification:").toLongOrNull()
             ?: error("Responses turn does not identify a notification")
     }
-    val acknowledgedIds = mutableSetOf<Long>()
-    suspend fun acknowledgeTurn(turnId: String): Boolean
+    val acknowledgementAttempts = mutableSetOf<Long>()
+    var acknowledgementsSucceeded = true
+    suspend fun acknowledgeTurn(turnId: String)
     {
         val id = notificationId(turnId)
-        if (id in acknowledgedIds) return true
-        if (!acknowledge(id)) return false
-        acknowledgedIds += id
-        return true
+        if (!acknowledgementAttempts.add(id)) return
+        if (!acknowledge(id)) acknowledgementsSucceeded = false
     }
+    // Terminal deliveries can fall outside the unread page before acknowledgement succeeds.
+    for (turnId in completedUnacknowledgedTurnIds)
+        acknowledgeTurn(turnId)
+
     if (pendingTurnId != null)
     {
-        notificationId(pendingTurnId)
-        // The session already owns the original input, even if the notification is no longer unread.
-        if (!isCompleted(pendingTurnId) && !process(pendingTurnId, null)) return false
-        if (!acknowledgeTurn(pendingTurnId)) return false
+        require(pendingDeliveryIds.isNotEmpty()) { "Pending Responses batch has no delivery IDs" }
+        val deliveries = pendingDeliveryIds.distinct()
+        deliveries.forEach(::notificationId)
+        // Only a cancellation or interrupted process leaves a pending batch. Its input is saved.
+        val success = deliveries.all(isCompleted) || process(pendingTurnId, null)
+        for (deliveryId in deliveries)
+            acknowledgeTurn(deliveryId)
+        if (!success) return false
     }
-    // A completed turn can fall outside the forum's unread page before acknowledgement succeeds.
-    // Drain the durable acknowledgement ledger before accepting more work.
-    for (turnId in completedUnacknowledgedTurnIds)
-        if (!acknowledgeTurn(turnId)) return false
+
+    val batch = mutableListOf<UnreadNotification>()
     for (notification in notifications.asReversed().distinctBy { it.notificationId })
     {
-        if (notification.notificationId in acknowledgedIds) continue
-        val turnId = "notification:${notification.notificationId}"
-        if (!isCompleted(turnId) && !process(turnId, notification)) return false
-        // Completion is checkpointed by the Responses loop before this acknowledgement. If it
-        // fails, the next poll retries only this operation, never the model or its forum actions.
-        if (!acknowledgeTurn(turnId)) return false
+        if (notification.notificationId in acknowledgementAttempts) continue
+        val deliveryId = "notification:${notification.notificationId}"
+        if (isCompleted(deliveryId))
+        {
+            acknowledgeTurn(deliveryId)
+        }
+        else batch += notification
     }
-    return true
+    if (batch.isEmpty()) return acknowledgementsSucceeded
+
+    val turnId = "notifications:" + batch.joinToString(",") { it.notificationId.toString() }
+    val success = process(turnId, batch)
+    // The Responses loop checkpoints both success and non-cancellation failure as terminal.
+    // A read-ack failure retries only this operation, never the batch or its forum actions.
+    for (notification in batch)
+        acknowledgeTurn("notification:${notification.notificationId}")
+    return success && acknowledgementsSucceeded
 }
 
-internal fun notificationInput(notification: UnreadNotification): ChatMessages = ChatMessages(
+internal fun notificationInput(notifications: List<UnreadNotification>): ChatMessages = ChatMessages(
     Role.USER,
     buildString {
-        append("收到新的论坛通知，notificationId=${notification.notificationId}。")
-        if (notification.topicId != null)
-            append("关联topicId=${notification.topicId}，请查看相关话题并决定是否回复、点赞或仅浏览。")
-        else append("这条通知没有关联topicId；没有明确话题时无需执行论坛操作。")
+        appendLine("收到以下一批论坛通知，按从旧到新排列。请统筹处理相关话题，决定是否回复、点赞或仅浏览；同一话题无需因多个通知重复操作。")
+        for (notification in notifications)
+        {
+            append("- notificationId=${notification.notificationId}，")
+            if (notification.topicId != null) appendLine("topicId=${notification.topicId}")
+            else appendLine("没有关联topicId；没有明确话题时无需执行论坛操作。")
+        }
     },
 )
 
@@ -178,103 +197,102 @@ private suspend fun work(
 )
 {
     val model = aiConfig.model
-    if (currentSessionScope(model) != startupScope)
-    {
-        logger.severe("Forum identity or Responses endpoint/key changed. Restart with the matching session data directory before processing more notifications.")
-        return
+    check(currentSessionScope(model) == startupScope) {
+        "Forum identity or Responses endpoint/key changed. Notification processing stopped; restore matching configuration and restart."
     }
     val notifications = user.getUnreadNotifications()
-    if (notifications.isNotEmpty()) logger.info("Processing ${notifications.size} unread notifications in the Responses conversation")
+    if (notifications.isNotEmpty()) logger.info("Processing a batch of ${notifications.size} unread notifications in the Responses conversation")
     val tools = AiToolSet(Forum(user, blackList, images = images), ReadImage()).getTools(null, model)
 
-    logger.warning("Failed to process forum notifications") {
-        processNotifications(
-            notifications = notifications,
-            pendingTurnId = session.pendingTurnId,
-            completedUnacknowledgedTurnIds = session.completedUnacknowledgedTurnIds,
-            isCompleted = session::isCompleted,
-            process = { turnId, notification ->
-                val defaultPrinter = MessagePrinter(
-                    reasoningColor = SimpleAnsiColor.CYAN,
-                    messageColor = SimpleAnsiColor.CYAN,
-                    thinkingTagColor = SimpleAnsiColor.GREEN,
-                )
-                var toolPrinter: MessagePrinter? = null
-                val result = try
-                {
-                    sendAiRequest(
-                        model = model,
-                        messages = notification?.let(::notificationInput) ?: ChatMessages.empty(),
-                        instructions = instructions,
-                        tools = tools,
-                        session = session,
-                        turnId = turnId,
-                        stream = true,
-                        onGeneratedImage = { image ->
-                            images.save(image.id, image.base64, image.format)
-                            "图片已保存，imageId=${image.id}。如需在论坛发送，请调用upload_generated_image并传入该imageId与目标topicId，获得Markdown后放入send_post的内容。"
-                        },
-                    ) { slice ->
-                        if (slice is StreamAiResponseSlice.Message)
+    processNotifications(
+        notifications = notifications,
+        pendingTurnId = session.pendingTurnId,
+        pendingDeliveryIds = session.pendingDeliveryIds,
+        completedUnacknowledgedTurnIds = session.completedUnacknowledgedTurnIds,
+        isCompleted = session::isCompleted,
+        process = { turnId, batch ->
+            val defaultPrinter = MessagePrinter(
+                reasoningColor = SimpleAnsiColor.CYAN,
+                messageColor = SimpleAnsiColor.CYAN,
+                thinkingTagColor = SimpleAnsiColor.GREEN,
+            )
+            var toolPrinter: MessagePrinter? = null
+            val result = try
+            {
+                sendAiRequest(
+                    model = model,
+                    messages = batch?.let(::notificationInput) ?: ChatMessages.empty(),
+                    instructions = instructions,
+                    tools = tools,
+                    session = session,
+                    turnId = turnId,
+                    deliveryIds = batch?.map { "notification:${it.notificationId}" } ?: session.pendingDeliveryIds,
+                    stream = true,
+                    onGeneratedImage = { image ->
+                        images.save(image.id, image.base64, image.format)
+                        "图片已保存，imageId=${image.id}。如需在论坛发送，请调用upload_generated_image并传入该imageId与目标topicId，获得Markdown后放入send_post的内容。"
+                    },
+                ) { slice ->
+                    if (slice is StreamAiResponseSlice.Message)
+                    {
+                        toolPrinter?.flush()
+                        toolPrinter = null
+                        defaultPrinter.put(slice.reasoningContent, true)
+                        defaultPrinter.put(slice.content, false)
+                    }
+                    else
+                    {
+                        defaultPrinter.flush()
+                        if (slice is StreamAiResponseSlice.ToolMessage)
                         {
-                            toolPrinter?.flush()
-                            toolPrinter = null
-                            defaultPrinter.put(slice.reasoningContent, true)
-                            defaultPrinter.put(slice.content, false)
+                            toolPrinter = toolPrinter ?: MessagePrinter(
+                                reasoningColor = SimpleAnsiColor.YELLOW,
+                                messageColor = SimpleAnsiColor.YELLOW,
+                                thinkingTagColor = SimpleAnsiColor.BLUE,
+                            )
+                            toolPrinter!!.put(slice.reasoningContent.toText(), false)
                         }
                         else
                         {
-                            defaultPrinter.flush()
-                            if (slice is StreamAiResponseSlice.ToolMessage)
-                            {
-                                toolPrinter = toolPrinter ?: MessagePrinter(
-                                    reasoningColor = SimpleAnsiColor.YELLOW,
-                                    messageColor = SimpleAnsiColor.YELLOW,
-                                    thinkingTagColor = SimpleAnsiColor.BLUE,
-                                )
-                                toolPrinter!!.put(slice.reasoningContent.toText(), false)
-                            }
-                            else
-                            {
-                                toolPrinter?.flush()
-                                toolPrinter = null
-                            }
-                            if (slice is StreamAiResponseSlice.ToolCall)
-                                logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${slice.tool.name}>${slice.parms}</tool>" + AnsiStyle.RESET)
+                            toolPrinter?.flush()
+                            toolPrinter = null
                         }
+                        if (slice is StreamAiResponseSlice.ToolCall)
+                            logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${slice.tool.name}>${slice.parms}</tool>" + AnsiStyle.RESET)
                     }
                 }
-                finally
+            }
+            finally
+            {
+                toolPrinter?.flush()
+                defaultPrinter.flush()
+            }
+            when (result)
+            {
+                is AiResult.Success -> {
+                    logger.fine("Completed $turnId in the Responses conversation")
+                    true
+                }
+                is AiResult.UnknownError -> {
+                    logger.severe("Responses batch $turnId failed and was discarded", result.error)
+                    false
+                }
+                is AiResult.Cancelled -> throw CancellationException("Responses batch $turnId was cancelled")
+                else -> {
+                    logger.severe("Responses batch $turnId failed and was discarded: ${result::class.simpleName}")
+                    false
+                }
+            }
+        },
+        acknowledge = { notificationId ->
+            user.markAsRead(notificationId).also { success ->
+                if (success)
                 {
-                    toolPrinter?.flush()
-                    defaultPrinter.flush()
+                    session.acknowledge("notification:$notificationId")
+                    logger.fine("Marked notification $notificationId as read")
                 }
-                when (result)
-                {
-                    is AiResult.Success -> {
-                        logger.fine("Completed $turnId in the Responses conversation")
-                        true
-                    }
-                    is AiResult.UnknownError -> {
-                        logger.severe("Responses turn $turnId failed", result.error)
-                        false
-                    }
-                    else -> {
-                        logger.severe("Responses turn $turnId failed: ${result::class.simpleName}")
-                        false
-                    }
-                }
-            },
-            acknowledge = { notificationId ->
-                user.markAsRead(notificationId).also { success ->
-                    if (success)
-                    {
-                        session.acknowledge("notification:$notificationId")
-                        logger.fine("Marked notification $notificationId as read")
-                    }
-                    else logger.warning("Notification $notificationId is complete, but marking it as read failed; only acknowledgement will be retried")
-                }
-            },
-        )
-    }
+                else logger.warning("Notification $notificationId is complete, but marking it as read failed; only acknowledgement will be retried")
+            }
+        },
+    )
 }

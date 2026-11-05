@@ -1,7 +1,7 @@
 package moe.tachyon.windwhisper
 
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.forum.UnreadNotification
 import kotlin.test.BeforeTest
@@ -18,27 +18,114 @@ class NotificationWorkTest
     fun initialize() = initializeTestEnvironment()
 
     @Test
-    fun `each notification gets its own turn in oldest first order`() = runBlocking {
+    fun `one poll delivers one oldest first batch with notification IDs deduplicated`() = runBlocking {
         val events = mutableListOf<String>()
-        val notifications = listOf(UnreadNotification(42, 2), UnreadNotification(42, 1))
-        assertTrue(processNotifications(notifications, null, { false }, { turn, notification ->
-            events += "process:$turn:${notification!!.topicId}"
+        val notifications = listOf(UnreadNotification(42, 2), UnreadNotification(42, 1), UnreadNotification(42, 1))
+        assertTrue(processNotifications(notifications, null, { false }, { turn, batch ->
+            events += "process:$turn"
+            assertEquals(listOf(1L, 2L), batch!!.map { it.notificationId })
+            assertEquals(listOf(42, 42), batch.map { it.topicId })
             true
         }, { id -> events += "ack:$id"; true }))
-        assertEquals(listOf("process:notification:1:42", "ack:1", "process:notification:2:42", "ack:2"), events)
+        assertEquals(listOf("process:notifications:1,2", "ack:1", "ack:2"), events)
     }
 
     @Test
-    fun `failed turn stays unread and prevents later turns`() = runBlocking {
+    fun `failed batch is acknowledged and not repeated on the next poll`() = runBlocking {
         val events = mutableListOf<String>()
-        assertFalse(processNotifications(listOf(UnreadNotification(2, 2), UnreadNotification(1, 1)),
-            null, { false }, { turn, _ -> events += "process:$turn"; false },
-            { id -> events += "ack:$id"; true }))
-        assertEquals(listOf("process:notification:1"), events)
+        val completed = mutableSetOf<String>()
+        val notifications = listOf(UnreadNotification(2, 2), UnreadNotification(1, 1))
+        assertFalse(processNotifications(notifications, null, completed::contains, { turn, batch ->
+            events += "failed:$turn"
+            completed += batch!!.map { "notification:${it.notificationId}" }
+            false
+        }, { id -> events += "ack:$id"; true }))
+        assertEquals(listOf("failed:notifications:1,2", "ack:1", "ack:2"), events)
+        events.clear()
+        assertTrue(processNotifications(notifications, null, completed::contains, { _, _ ->
+            error("A failed batch must not run again")
+        }, { id -> events += "ack:$id"; true }))
+        assertEquals(listOf("ack:1", "ack:2"), events)
     }
 
     @Test
-    fun `cancelling a turn leaves it unread and prevents later notifications`() = runBlocking {
+    fun `partial acknowledgement failure retries only remaining acknowledgements before new batch`() = runBlocking {
+        val events = mutableListOf<String>()
+        val completed = mutableSetOf<String>()
+        val unacknowledged = mutableSetOf<String>()
+        assertFalse(processNotifications(
+            notifications = listOf(UnreadNotification(2, 2), UnreadNotification(1, 1)),
+            pendingTurnId = null,
+            isCompleted = completed::contains,
+            process = { turn, batch ->
+                events += "process:$turn"
+                val deliveries = batch!!.map { "notification:${it.notificationId}" }
+                completed += deliveries
+                unacknowledged += deliveries
+                true
+            },
+            acknowledge = { id ->
+                events += "ack:$id"
+                if (id == 1L) { unacknowledged -= "notification:$id"; true } else false
+            },
+        ))
+        assertEquals(listOf("process:notifications:1,2", "ack:1", "ack:2"), events)
+        assertEquals(setOf("notification:2"), unacknowledged)
+        events.clear()
+        assertTrue(processNotifications(
+            notifications = listOf(UnreadNotification(3, 3), UnreadNotification(2, 2)),
+            pendingTurnId = null,
+            isCompleted = completed::contains,
+            process = { turn, batch ->
+                events += "process:$turn"
+                assertEquals(listOf(3L), batch!!.map { it.notificationId })
+                completed += batch.map { "notification:${it.notificationId}" }
+                true
+            },
+            acknowledge = { id -> events += "ack:$id"; unacknowledged -= "notification:$id"; true },
+            completedUnacknowledgedTurnIds = unacknowledged.toList(),
+        ))
+        assertEquals(listOf("ack:2", "process:notifications:3", "ack:3"), events)
+        assertTrue(unacknowledged.isEmpty())
+    }
+
+    @Test
+    fun `restart drains acknowledgement ledger then resumes pending batch before new notifications`() = runBlocking {
+        val events = mutableListOf<String>()
+        assertTrue(processNotifications(
+            notifications = listOf(UnreadNotification(4, 4), UnreadNotification(3, 3)),
+            pendingTurnId = "notifications:2,3",
+            pendingDeliveryIds = listOf("notification:2", "notification:3"),
+            isCompleted = { it == "notification:1" },
+            process = { turn, batch ->
+                if (turn == "notifications:2,3") assertNull(batch)
+                else assertEquals(listOf(4L), batch!!.map { it.notificationId })
+                events += "process:$turn"
+                true
+            },
+            acknowledge = { id -> events += "ack:$id"; true },
+            completedUnacknowledgedTurnIds = listOf("notification:1"),
+        ))
+        assertEquals(listOf("ack:1", "process:notifications:2,3", "ack:2", "ack:3",
+            "process:notifications:4", "ack:4"), events)
+    }
+
+    @Test
+    fun `failed resumed batch is acknowledged without starting another batch in the same poll`() = runBlocking {
+        val events = mutableListOf<String>()
+        assertFalse(processNotifications(
+            notifications = listOf(UnreadNotification(3, 3)),
+            pendingTurnId = "notifications:1,2",
+            pendingDeliveryIds = listOf("notification:1", "notification:2"),
+            isCompleted = { false },
+            process = { turn, batch -> assertNull(batch); events += "failed:$turn"; false },
+            acknowledge = { id -> events += "ack:$id"; true },
+        ))
+        assertEquals(listOf("failed:notifications:1,2", "ack:1", "ack:2"), events)
+    }
+
+    @Test
+    fun `cancelling a batch leaves all its notifications unread`() = runBlocking {
         val events = mutableListOf<String>()
         assertFailsWith<CancellationException> {
             processNotifications(listOf(UnreadNotification(2, 2), UnreadNotification(1, 1)),
@@ -47,94 +134,68 @@ class NotificationWorkTest
                     throw CancellationException("Application is stopping")
                 }, { id -> events += "ack:$id"; true })
         }
-        assertEquals(listOf("process:notification:1"), events)
+        assertEquals(listOf("process:notifications:1,2"), events)
     }
 
     @Test
-    fun `completed notifications only retry acknowledgement after failure`() = runBlocking {
+    fun `persistent acknowledgement failure does not block pending or new work or repeat old deliveries`() = runBlocking {
         val events = mutableListOf<String>()
-        val completed = mutableSetOf<String>()
-        val notifications = listOf(UnreadNotification(2, 2), UnreadNotification(1, 1))
-        assertFalse(processNotifications(notifications, null, completed::contains, { turn, _ ->
-            events += "process:$turn"
-            completed += turn
-            true
-        }, { id -> events += "failed-ack:$id"; false }))
-        assertEquals(listOf("process:notification:1", "failed-ack:1"), events)
-        events.clear()
-        assertTrue(processNotifications(notifications, null, completed::contains, { turn, _ ->
-            events += "process:$turn"
-            completed += turn
-            true
-        }, { id -> events += "ack:$id"; true }))
-        assertEquals(listOf("ack:1", "process:notification:2", "ack:2"), events)
-    }
-
-    @Test
-    fun `pending turn resumes before unread notifications even when missing from the list`() = runBlocking {
-        val events = mutableListOf<String>()
-        assertTrue(processNotifications(listOf(UnreadNotification(2, 2)), "notification:1", { false },
-            { turn, notification ->
-                if (turn == "notification:1") assertNull(notification)
-                else assertEquals(2, notification!!.topicId)
+        val completed = mutableSetOf("notification:1")
+        assertFalse(processNotifications(
+            notifications = listOf(UnreadNotification(3, 3), UnreadNotification(1, 1)),
+            pendingTurnId = "notifications:2",
+            pendingDeliveryIds = listOf("notification:2"),
+            isCompleted = completed::contains,
+            process = { turn, batch ->
                 events += "process:$turn"
+                if (batch == null) completed += "notification:2"
+                else completed += batch.map { "notification:${it.notificationId}" }
                 true
-            }, { id -> events += "ack:$id"; true }))
-        assertEquals(listOf("process:notification:1", "ack:1", "process:notification:2", "ack:2"), events)
-    }
-
-    @Test
-    fun `pending turn also present in unread list is not delivered twice`() = runBlocking {
-        val events = mutableListOf<String>()
-        assertTrue(processNotifications(listOf(UnreadNotification(1, 1)), "notification:1", { false },
-            { turn, notification -> assertNull(notification); events += "process:$turn"; true },
-            { id -> events += "ack:$id"; true }))
-        assertEquals(listOf("process:notification:1", "ack:1"), events)
-    }
-
-    @Test
-    fun `completed acknowledgement ledger drains before new work after restart`() = runBlocking {
-        val events = mutableListOf<String>()
-        assertTrue(processNotifications(
-            notifications = listOf(UnreadNotification(4, 4), UnreadNotification(3, 3)),
-            pendingTurnId = "notification:2",
-            isCompleted = { it == "notification:1" || it == "notification:3" },
-            process = { turn, notification ->
-                if (turn == "notification:2") assertNull(notification)
+            },
+            acknowledge = { id -> events += "ack:$id"; id != 1L },
+            completedUnacknowledgedTurnIds = listOf("notification:1"),
+        ))
+        assertEquals(listOf("ack:1", "process:notifications:2", "ack:2", "process:notifications:3", "ack:3"), events)
+        events.clear()
+        assertFalse(processNotifications(
+            notifications = listOf(UnreadNotification(4, 4), UnreadNotification(1, 1)),
+            pendingTurnId = null,
+            isCompleted = completed::contains,
+            process = { turn, batch ->
+                assertEquals(listOf(4L), batch!!.map { it.notificationId })
                 events += "process:$turn"
                 true
             },
-            acknowledge = { id -> events += "ack:$id"; true },
-            completedUnacknowledgedTurnIds = listOf("notification:1", "notification:3"),
-        ))
-        assertEquals(listOf("process:notification:2", "ack:2", "ack:1", "ack:3",
-            "process:notification:4", "ack:4"), events)
-    }
-
-    @Test
-    fun `failed ledger acknowledgement blocks new work without repeating the model`() = runBlocking {
-        val events = mutableListOf<String>()
-        assertFalse(processNotifications(
-            notifications = listOf(UnreadNotification(2, 2)),
-            pendingTurnId = null,
-            isCompleted = { it == "notification:1" },
-            process = { turn, _ -> events += "process:$turn"; true },
-            acknowledge = { id -> events += "failed-ack:$id"; false },
+            acknowledge = { id -> events += "ack:$id"; id != 1L },
             completedUnacknowledgedTurnIds = listOf("notification:1"),
         ))
-        assertEquals(listOf("failed-ack:1"), events)
+        assertEquals(listOf("ack:1", "process:notifications:4", "ack:4"), events)
     }
 
     @Test
-    fun `notification input contains only the current notification details`()
+    fun `failed batch attempts every acknowledgement even when the first one fails`() = runBlocking {
+        val events = mutableListOf<String>()
+        assertFalse(processNotifications(
+            notifications = listOf(UnreadNotification(3, 3), UnreadNotification(2, 2), UnreadNotification(1, 1)),
+            pendingTurnId = null,
+            isCompleted = { false },
+            process = { turn, _ -> events += "failed:$turn"; false },
+            acknowledge = { id -> events += "ack:$id"; id != 1L },
+        ))
+        assertEquals(listOf("failed:notifications:1,2,3", "ack:1", "ack:2", "ack:3"), events)
+    }
+
+    @Test
+    fun `notification input is one user message containing every delivery`()
     {
-        val message = notificationInput(UnreadNotification(42, 123)).single()
+        val message = notificationInput(listOf(UnreadNotification(42, 123), UnreadNotification(42, 124),
+            UnreadNotification(null, 125))).single()
         assertEquals(Role.USER, message.role)
-        assertTrue("notificationId=123" in message.content.toText())
-        assertTrue("topicId=42" in message.content.toText())
-        val noTopic = notificationInput(UnreadNotification(null, 124)).single()
-        assertEquals(Role.USER, noTopic.role)
-        assertTrue("notificationId=124" in noTopic.content.toText())
-        assertTrue("没有关联topicId" in noTopic.content.toText())
+        val text = message.content.toText()
+        assertTrue("notificationId=123，topicId=42" in text)
+        assertTrue("notificationId=124，topicId=42" in text)
+        assertTrue("notificationId=125，没有关联topicId" in text)
+        assertTrue(text.indexOf("notificationId=123") < text.indexOf("notificationId=124"))
+        assertTrue(text.indexOf("notificationId=124") < text.indexOf("notificationId=125"))
     }
 }

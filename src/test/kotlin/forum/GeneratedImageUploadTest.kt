@@ -3,6 +3,7 @@ package moe.tachyon.windwhisper.forum
 import com.sun.net.httpserver.HttpServer
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
@@ -66,8 +67,10 @@ class GeneratedImageUploadTest
         val jpeg = imageBytes("jpeg")
         val webp = Base64.getDecoder().decode("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
         listOf("png" to png, "jpeg" to jpeg, "webp" to webp).forEach { (format, bytes) ->
+            assertFalse(store.contains("ig_$format"))
             store.save("ig_$format", base64(bytes), format)
             store.save("ig_$format", base64(bytes), format)
+            assertTrue(GeneratedImageStore(directory).contains("ig_$format"))
             val restored = GeneratedImageStore(directory).read("ig_$format")
             assertContentEquals(bytes, restored.bytes)
             assertEquals("image/$format", restored.contentType)
@@ -86,6 +89,7 @@ class GeneratedImageUploadTest
         listOf("../outside", "/tmp/file", "", "uuid:outside").forEach { id ->
             assertFailsWith<IllegalArgumentException> { store.save(id, png, "png") }
             assertFailsWith<IllegalArgumentException> { store.read(id) }
+            assertFailsWith<IllegalArgumentException> { store.contains(id) }
         }
         assertFailsWith<IllegalArgumentException> { store.save("ig_bad", "not base64", "png") }
         assertFailsWith<IllegalArgumentException> { store.save("ig_bad", png, "jpeg") }
@@ -157,7 +161,7 @@ class GeneratedImageUploadTest
             assertTrue("无效" in invoke(tools, "upload_generated_image", uploadArgs("../outside", 7)))
             assertTrue("未找到" in invoke(tools, "upload_generated_image", uploadArgs("ig_unknown", 7)))
             directory.listFiles()!!.single().writeText("not an image")
-            assertTrue("失败" in invoke(tools, "upload_generated_image", uploadArgs("ig_example", 7)))
+            assertFailsWith<IllegalArgumentException> { invoke(tools, "upload_generated_image", uploadArgs("ig_example", 7)) }
             assertTrue(server.requests.none { it.path == "/uploads.json" || it.path == "/posts.json" })
             server.verify()
         }
@@ -170,10 +174,106 @@ class GeneratedImageUploadTest
         MockForum { request -> if (request.path == "/t/7.json") Reply(topic()) else Reply("""{"short_url":"javascript:alert(1)"}""") }.use { server ->
             configure(server)
             assertTrue(forumTools(null).none { it.name == "upload_generated_image" })
-            val result = invoke(forumTools(store), "upload_generated_image", uploadArgs("ig_example", 7))
-            assertTrue("失败" in result)
-            assertFalse("javascript" in result)
+            val error = assertFailsWith<IllegalArgumentException> {
+                invoke(forumTools(store), "upload_generated_image", uploadArgs("ig_example", 7))
+            }
+            assertTrue("short_url" in error.message.orEmpty())
+            assertFalse("javascript" in error.message.orEmpty())
             assertTrue(server.requests.none { it.path == "/posts.json" })
+            server.verify()
+        }
+    }
+
+    @Test
+    fun `forum read post and upload HTTP failures propagate without returning tool text or retrying writes`() = runBlocking {
+        val store = GeneratedImageStore(directory())
+        store.save("ig_example", base64(imageBytes()), "png")
+        val cases = listOf(
+            Triple("get_topic", "/t/7.json", Json.parseToJsonElement("""{"topicIds":[7]}""").jsonObject),
+            Triple("get_posts", "/t/7/1.json", Json.parseToJsonElement("""{"posts":[{"topicId":7,"postNumber":1}]}""").jsonObject),
+            Triple("send_post", "/posts.json", Json.parseToJsonElement("""{"topicId":7,"content":"One post","replyTo":0}""").jsonObject),
+            Triple("upload_generated_image", "/uploads.json", uploadArgs("ig_example", 7)),
+        )
+        cases.forEach { (toolName, path, arguments) ->
+            MockForum { request -> if (request.path == path) Reply("{}", 500) else Reply(topic()) }.use { server ->
+                configure(server)
+                val error = assertNotNull(runCatching {
+                    withTimeout(5_000) { invoke(forumTools(store), toolName, arguments) }
+                }.exceptionOrNull(), "$toolName must propagate HTTP failures")
+                assertFalse(error is CancellationException, "$toolName must fail before the test timeout")
+                assertTrue("500" in error.message.orEmpty())
+                assertEquals(1, server.requests.count { it.path == path }, "$toolName must not retry the failed request")
+                server.verify()
+            }
+        }
+    }
+
+    @Test
+    fun `forum read and upload malformed responses propagate instead of becoming tool text`() = runBlocking {
+        val store = GeneratedImageStore(directory())
+        store.save("ig_example", base64(imageBytes()), "png")
+        val cases = listOf(
+            Triple("get_topic", "/t/7.json", Json.parseToJsonElement("""{"topicIds":[7]}""").jsonObject),
+            Triple("get_posts", "/t/7/1.json", Json.parseToJsonElement("""{"posts":[{"topicId":7,"postNumber":1}]}""").jsonObject),
+            Triple("upload_generated_image", "/uploads.json", uploadArgs("ig_example", 7)),
+        )
+        cases.forEach { (toolName, path, arguments) ->
+            MockForum { request -> if (request.path == path) Reply("not-json") else Reply(topic()) }.use { server ->
+                configure(server)
+                val error = assertNotNull(runCatching {
+                    withTimeout(5_000) { invoke(forumTools(store), toolName, arguments) }
+                }.exceptionOrNull(), "$toolName must propagate response parsing failures")
+                assertFalse(error is CancellationException)
+                assertEquals(1, server.requests.count { it.path == path })
+                server.verify()
+            }
+        }
+    }
+
+    @Test
+    fun `missing posts remain empty but HTTP and incomplete success responses fail in both readers`() = runBlocking {
+        var reply = Reply("{}", 404)
+        MockForum { reply }.use { server ->
+            configure(server)
+            val user = LoginData("forum-session=fixture", "csrf-fixture")
+            assertEquals(emptyList(), user.getPosts(7, listOf(21)))
+            assertEquals(emptyList(), user.getPosts(7, 1))
+            assertTrue("不存在" in invoke(forumTools(null), "get_topic", Json.parseToJsonElement("""{"topicIds":[7]}""").jsonObject))
+            listOf(Reply("{}", 500), Reply("{}"), Reply("""{"post_stream":{}}""")).forEach { response ->
+                reply = response
+                assertFailsWith<IllegalStateException> { user.getPosts(7, listOf(21)) }
+                assertFailsWith<IllegalStateException> { user.getPosts(7, 1) }
+            }
+            reply = Reply("""{"post_stream":{"posts":[]}}""")
+            assertEquals(emptyList(), user.getPosts(7, listOf(21)))
+            assertEquals(emptyList(), user.getPosts(7, 1))
+            server.verify()
+        }
+    }
+
+    @Test
+    fun `optional topic category is accepted but category request failures propagate`() = runBlocking {
+        var categoryId: JsonElement? = null
+        MockForum { request ->
+            if (request.path == "/t/7.json")
+            {
+                val fields = Json.parseToJsonElement(topic()).jsonObject.toMutableMap()
+                categoryId?.let { fields["category_id"] = it }
+                Reply(JsonObject(fields).toString())
+            }
+            else Reply("{}", 500)
+        }.use { server ->
+            configure(server)
+            val tools = forumTools(null)
+            val arguments = Json.parseToJsonElement("""{"topicIds":[7]}""").jsonObject
+            assertTrue("Test topic" in invoke(tools, "get_topic", arguments))
+            categoryId = JsonNull
+            assertTrue("Test topic" in invoke(tools, "get_topic", arguments))
+            assertTrue(server.requests.none { it.path.startsWith("/c/") })
+            categoryId = JsonPrimitive(2)
+            val error = assertFailsWith<IllegalStateException> { invoke(tools, "get_topic", arguments) }
+            assertTrue("500" in error.message.orEmpty())
+            assertEquals(1, server.requests.count { it.path == "/c/2/show.json" })
             server.verify()
         }
     }
