@@ -21,6 +21,7 @@ import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.utils.Either
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
+import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -61,7 +62,7 @@ private val client = HttpClient(ktorClientEngineFactory)
     engine()
     {
         dispatcher = Dispatchers.IO
-        requestTimeout = 0
+        config { callTimeout(0, TimeUnit.MILLISECONDS) }
     }
     install(ContentNegotiation)
     {

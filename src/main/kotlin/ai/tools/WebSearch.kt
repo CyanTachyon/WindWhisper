@@ -2,7 +2,6 @@ package moe.tachyon.windwhisper.ai.tools
 
 import io.ktor.client.*
 import io.ktor.client.call.*
-import io.ktor.client.engine.cio.endpoint
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -26,6 +25,8 @@ import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.showJson
 import moe.tachyon.windwhisper.utils.JsonSchema
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
+import okhttp3.ConnectionPool
+import java.util.concurrent.TimeUnit
 
 object WebSearch: AiToolSet.ToolProvider<Any?>
 {
@@ -42,10 +43,10 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
         engine()
         {
             dispatcher = Dispatchers.IO
-            requestTimeout = timeout
-            endpoint {
-                connectTimeout = timeout
-                keepAliveTime = timeout
+            config {
+                callTimeout(timeout, TimeUnit.MILLISECONDS)
+                connectTimeout(timeout, TimeUnit.MILLISECONDS)
+                connectionPool(ConnectionPool(5, timeout, TimeUnit.MILLISECONDS))
             }
         }
         install(ContentNegotiation)

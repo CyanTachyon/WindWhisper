@@ -3,6 +3,7 @@
 package moe.tachyon.windwhisper.ai.internal.imageGeneration
 
 import io.ktor.client.*
+import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -19,10 +20,10 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
+import moe.tachyon.windwhisper.utils.downloadHttpClient
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import moe.tachyon.windwhisper.utils.toJpegBytes
-import java.awt.image.BufferedImage
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
 
 private val logger = WindWhisperLogger.getLogger()
@@ -77,7 +78,7 @@ private val client = HttpClient(ktorClientEngineFactory)
     engine()
     {
         dispatcher = Dispatchers.IO
-        requestTimeout = 0
+        config { callTimeout(0, TimeUnit.MILLISECONDS) }
     }
     install(ContentNegotiation)
     {
@@ -138,12 +139,14 @@ suspend fun sendImageGenerationRequest(
         logger.warning("Failed to decode image generation response: $response")
     }.getOrThrow()
 
-    val images = res.images
-        .map(Response.Image::url)
-        .map(::URL)
-        .map(ImageIO::read)
-        .map(BufferedImage::toJpegBytes)
-    return images
+    return res.images.map { image ->
+        val response = downloadHttpClient.get(image.url)
+        require(response.status.isSuccess()) { "Image download failed with HTTP status ${response.status.value}" }
+        val bytes = response.body<ByteArray>()
+        val decoded = bytes.inputStream().use { ImageIO.read(it) }
+            ?: error("Downloaded image has an unsupported format")
+        decoded.toJpegBytes()
+    }
 }
 
 suspend fun sendImageGenerationRequest(

@@ -58,6 +58,19 @@ Edit `config.json`:
 }
 ```
 
+To route all outgoing requests through a SOCKS5 proxy, edit `configs/network.yml`:
+
+```yaml
+proxy:
+  host: "127.0.0.1"
+  port: 1080
+  # Set both fields if the proxy requires authentication; otherwise omit them
+  # username: "your_proxy_username"
+  # password: "your_proxy_password"
+```
+
+The default `proxy: null` uses direct connections. This setting covers the forum, model APIs (including streaming), Tavily, and image/PDF/video downloads; destination names are resolved by the proxy. Responses hosted search runs on the provider's servers; the local proxy covers requests to the Responses API. Restart the application after changing proxy settings; `config reload` does not update existing clients. A failed proxy connection returns an error without falling back to a direct connection. Configure the username and password together, using 1 to 255 ISO-8859-1 characters each.
+
 Edit `configs/ai.yml`:
 ```yaml
 # Timeout for AI requests in milliseconds

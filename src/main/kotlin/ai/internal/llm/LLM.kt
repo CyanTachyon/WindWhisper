@@ -3,7 +3,6 @@
 package moe.tachyon.windwhisper.ai.internal.llm
 
 import io.ktor.client.*
-import io.ktor.client.engine.cio.endpoint
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.plugins.sse.*
 import io.ktor.client.request.*
@@ -35,6 +34,8 @@ import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.utils.JsonSchema
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import moe.tachyon.windwhisper.utils.toJsonElement
+import okhttp3.ConnectionPool
+import java.util.concurrent.TimeUnit
 import kotlin.collections.set
 
 @Serializable
@@ -277,11 +278,10 @@ private val streamAiClient = HttpClient(ktorClientEngineFactory)
     engine()
     {
         dispatcher = Dispatchers.IO
-        requestTimeout = Int.MAX_VALUE.toLong()
-        endpoint()
-        {
-            keepAliveTime = aiConfig.timeout
-            connectTimeout = aiConfig.timeout
+        config {
+            callTimeout(0, TimeUnit.MILLISECONDS)
+            connectTimeout(aiConfig.timeout.coerceAtMost(Int.MAX_VALUE.toLong()), TimeUnit.MILLISECONDS)
+            connectionPool(ConnectionPool(5, aiConfig.timeout, TimeUnit.MILLISECONDS))
         }
     }
     install(SSE)
@@ -295,11 +295,10 @@ private val defaultAiClient = HttpClient(ktorClientEngineFactory)
     engine()
     {
         dispatcher = Dispatchers.IO
-        requestTimeout = Int.MAX_VALUE.toLong()
-        endpoint()
-        {
-            keepAliveTime = aiConfig.timeout
-            connectTimeout = aiConfig.timeout
+        config {
+            callTimeout(0, TimeUnit.MILLISECONDS)
+            connectTimeout(aiConfig.timeout.coerceAtMost(Int.MAX_VALUE.toLong()), TimeUnit.MILLISECONDS)
+            connectionPool(ConnectionPool(5, aiConfig.timeout, TimeUnit.MILLISECONDS))
         }
     }
     install(ContentNegotiation)

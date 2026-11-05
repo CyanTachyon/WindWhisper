@@ -1,12 +1,15 @@
 package moe.tachyon.windwhisper.ai.tools
 
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.http.isSuccess
 import io.ktor.util.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import moe.tachyon.windwhisper.ai.*
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.utils.*
-import java.net.URL
 import kotlin.math.sqrt
 import kotlin.uuid.ExperimentalUuidApi
 
@@ -26,33 +29,38 @@ class ReadImage(private val vlm: AiConfig.LlmModel?): AiToolSet.ToolProvider<Any
     @Serializable
     private data class SimpleParm(val urls: List<String>)
 
-    private fun List<String>.urlsToContent(): Either<List<ContentNode>, String> = runCatching()
+    private suspend fun List<String>.urlsToContent(): Either<List<ContentNode>, String> = runCatching()
     {
-        asSequence()
-            .flatMap()
+        buildList<ContentNode> {
+            for (url in this@urlsToContent)
             {
                 val bytes =
-                    if (it.startsWith("data:")) it.substringAfter(",").decodeBase64Bytes()
-                    else URL(it).readBytes()
-                DocumentConversion.documentToImages(bytes) ?: error("不支持的图片/PDF格式，URL：$it")
-            }.map()
-            { img ->
-                val totalPixels = img.width.toLong() * img.height.toLong()
-                if (totalPixels > 10_000_000)
+                    if (url.startsWith("data:")) url.substringAfter(",").decodeBase64Bytes()
+                    else downloadHttpClient.get(url).let { response ->
+                        require(response.status.isSuccess()) { "图片/PDF下载失败，HTTP状态码：${response.status.value}" }
+                        response.body<ByteArray>()
+                    }
+                val images = DocumentConversion.documentToImages(bytes)
+                    ?: error("不支持的图片/PDF格式，URL：$url")
+                for (img in images)
                 {
-                    val scale = sqrt(10_000_000.0 / totalPixels.toDouble())
-                    val newWidth = (img.width * scale).toInt().coerceAtLeast(1)
-                    val newHeight = (img.height * scale).toInt().coerceAtLeast(1)
-                    img.resize(newWidth, newHeight)
+                    val totalPixels = img.width.toLong() * img.height.toLong()
+                    val resized = if (totalPixels > 10_000_000)
+                    {
+                        val scale = sqrt(10_000_000.0 / totalPixels.toDouble())
+                        val newWidth = (img.width * scale).toInt().coerceAtLeast(1)
+                        val newHeight = (img.height * scale).toInt().coerceAtLeast(1)
+                        img.resize(newWidth, newHeight)
+                    }
+                    else img
+                    add(ContentNode.image("data:image/jpeg;base64," + resized.toJpegBytes().encodeBase64()))
                 }
-                else img
-            }.map()
-            {
-                "data:image/jpeg;base64," + it.toJpegBytes().encodeBase64()
-            }.map(ContentNode::image)
-            .toList()
-            .let { Either.Left(it) }
-    }.getOrElse { Either.Right(it.message ?: "未知错误") }
+            }
+        }.let { Either.Left(it) }
+    }.getOrElse {
+        if (it is CancellationException) throw it
+        Either.Right(it.message ?: "未知错误")
+    }
 
     override suspend fun <S> AiToolSet<S>.registerTools()
     {

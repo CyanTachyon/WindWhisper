@@ -58,6 +58,19 @@ java -jar WindWhisper.jar
 }
 ```
 
+如需让所有对外请求使用SOCKS5代理，编辑`configs/network.yml`：
+
+```yaml
+proxy:
+  host: "127.0.0.1"
+  port: 1080
+  # 代理需要认证时，同时填写以下两项；否则省略
+  # username: "your_proxy_username"
+  # password: "your_proxy_password"
+```
+
+默认`proxy: null`表示直连。该配置覆盖论坛、模型API（含流式响应）、Tavily及图片/PDF/视频下载；目标域名由代理解析。Responses内置搜索在服务商端执行，本地代理覆盖发往Responses API的请求。修改代理配置后需重启程序，`config reload`不会更新现有客户端。代理连接失败会报错，不会自动直连。用户名和密码需同时设置，每项支持1至255个ISO-8859-1字符。
+
 编辑`configs/ai.yml`:
 ```yaml
 # AI请求的超时时间，单位为毫秒
