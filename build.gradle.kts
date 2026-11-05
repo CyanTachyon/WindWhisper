@@ -39,6 +39,7 @@ dependencies {
     implementation("io.ktor:ktor-client-core-jvm") // core
     implementation("io.ktor:ktor-client-okhttp")
     implementation("io.ktor:ktor-client-content-negotiation") // request/response时反序列化
+    implementation("io.ktor:ktor-client-websockets") // GPT-Live speech streaming
 
     // ktor common
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm") // json on request/response

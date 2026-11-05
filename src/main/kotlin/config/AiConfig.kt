@@ -11,6 +11,7 @@ data class AiConfig(
     @YamlComment("超时时间（毫秒）：非流式请求/恢复GET为总时限；流式请求为无新事件的最长等待时间，包含等待响应头")
     val timeout: Long = 2 * 60 * 1_000,
     val model: LlmModel = LlmModel(),
+    val speech: SpeechConfig = SpeechConfig(),
 )
 {
     @Serializable

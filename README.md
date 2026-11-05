@@ -138,6 +138,26 @@ To deliberately start a new conversation after expiration or an unresolved inter
 
 The model can invoke the hosted `image_generation` tool. WindWhisper saves completed images under `data/generated-images/` and gives the model their image IDs. The model calls `upload_generated_image` with an image ID and destination topic ID to obtain forum Markdown, then includes that Markdown in `send_post`. Generating an image alone does not publish a forum post. Forum access restrictions still apply.
 
+### Generate speech with a saved voice
+
+Add a top-level `speech` section to `configs/ai.yml`. First create a voice once using OpenAI's [custom voice API](https://developers.openai.com/api/docs/guides/custom-voices), retaining its ID and original description. Prompt-created voices require GPT-Live.
+
+```yaml
+speech:
+  enabled: true
+  url: wss://api.openai.com/v1/live/sessions
+  model: gpt-live-1
+  voiceId: voice_your_saved_id
+  voicePrompt: "The original description used to create your voice"
+  timeoutMillis: 120000
+```
+
+Speech inherits the first Responses key only for the same provider; set `speech.key` explicitly for a different provider. Requests use the same configured SOCKS5 proxy. `config reload ai.yml` applies speech settings to the next turn's tools. Speech is disabled by default.
+
+The `generate_speech` tool accepts `text` (1–500 characters), `speed` (0.5–2.0, default 1), and `style` (for example, happy, calm, or gentle). The saved voice remains fixed across calls. Speed is approximate speaking-pace guidance, not an exact playback multiplier.
+
+GPT-Live is a continuous conversation API without a per-clip audio completion event. This tool checks the transcript and trailing audio silence to collect a clip; this is a heuristic, not a native TTS completion guarantee. Text mismatches, timeouts, and service errors return tool errors without automatic retry or incomplete uploads. Completed WAV files are saved under `data/generated-audio/` before being uploaded. The returned Markdown labels the audio as AI-generated and can be included in `send_post.content`; generating and uploading speech does not itself publish a post.
+
 ### Step 4: Running
 Run the following command again to start WindWhisper:
 ```bash

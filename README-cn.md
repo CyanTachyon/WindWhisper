@@ -138,6 +138,26 @@ OpenAI默认保留响应对象30天，因此长期空闲后`previous_response_id
 
 模型可以调用内置`image_generation`工具。程序将完整生成图片保存到`data/generated-images/`，并向模型提供image ID。模型通过`upload_generated_image`传入image ID和目标topic ID获得论坛Markdown，再将其放入`send_post`的内容。生成图片本身不会自动发帖，原有论坛访问限制继续生效。
 
+### 使用专属音色生成语音
+
+在`configs/ai.yml`的顶层添加`speech`配置。音色需要先通过OpenAI的[自定义音色接口](https://developers.openai.com/api/docs/guides/custom-voices)创建一次，保存返回的ID与原始声音描述。文字创建的音色仅支持GPT-Live。
+
+```yaml
+speech:
+  enabled: true
+  url: wss://api.openai.com/v1/live/sessions
+  model: gpt-live-1
+  voiceId: voice_your_saved_id
+  voicePrompt: "创建音色时使用的原始声音描述"
+  timeoutMillis: 120000
+```
+
+默认沿用同一服务商的Responses第一个密钥，也可显式设置`speech.key`。语音请求使用相同的SOCKS5代理。配置可通过`config reload ai.yml`重新载入，下一轮提供更新后的工具；默认关闭。
+
+模型可调用`generate_speech`，参数为`text`（1–500字符）、`speed`（0.5–2.0，默认1）和`style`（例如“开心”“平静”“温柔”）。声线固定使用配置中的`voiceId`，每次调用不会重新创建音色。`speed`通过说话节奏指令引导，是近似语速，不是精确播放倍率。
+
+GPT-Live是连续语音接口，没有逐段音频的完成事件；本工具通过转写与音频尾部静音检查收集片段，不能提供原生TTS的确定性完成保证。文字不匹配、超时、服务错误均作为工具错误返回，不自动重试或上传不完整片段。生成成功的WAV先保存到`data/generated-audio/`，再上传论坛，返回带“AI生成语音”标识的Markdown；模型可将其放入`send_post.content`。生成与上传本身不会发帖。
+
 ### 步骤4：运行
 再次运行以下命令启动WindWhisper：
 ```bash

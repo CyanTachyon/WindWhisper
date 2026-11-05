@@ -3,10 +3,7 @@ package moe.tachyon.windwhisper.console.command
 import kotlinx.coroutines.CancellationException
 import moe.tachyon.windwhisper.ConversationRuntime
 import moe.tachyon.windwhisper.ai.internal.llm.countResponsesInputTokens
-import moe.tachyon.windwhisper.ai.tools.AiToolSet
-import moe.tachyon.windwhisper.ai.tools.Forum
-import moe.tachyon.windwhisper.ai.tools.ReadImage
-import moe.tachyon.windwhisper.blackList
+import moe.tachyon.windwhisper.ai.tools.conversationTools
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.currentSessionScope
 
@@ -39,7 +36,7 @@ object Context: Command
         if (pending != null) sender.out("正在处理任务；以下计数针对已保存的请求输入，不包含仍在生成的输出。")
         try
         {
-            val tools = AiToolSet(Forum(runtime.user, blackList, images = runtime.images), ReadImage()).getTools(null, model)
+            val tools = conversationTools(runtime.user, runtime.images, model)
             val tokens = countResponsesInputTokens(
                 model = model,
                 input = pending?.input ?: snapshot.deferredInput,

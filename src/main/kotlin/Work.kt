@@ -9,9 +9,7 @@ import moe.tachyon.windwhisper.ai.internal.llm.AiResult
 import moe.tachyon.windwhisper.ai.internal.llm.ResponsesSession
 import moe.tachyon.windwhisper.ai.internal.llm.responsesSessionScope
 import moe.tachyon.windwhisper.ai.internal.llm.sendAiRequest
-import moe.tachyon.windwhisper.ai.tools.AiToolSet
-import moe.tachyon.windwhisper.ai.tools.Forum
-import moe.tachyon.windwhisper.ai.tools.ReadImage
+import moe.tachyon.windwhisper.ai.tools.conversationTools
 import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.console.AnsiColor
@@ -307,7 +305,7 @@ private suspend fun processConversationTurn(
     check(currentSessionScope(model) == startupScope) {
         "Forum identity or Responses endpoint/key changed. Restore matching configuration and restart."
     }
-    val tools = AiToolSet(Forum(user, blackList, images = images), ReadImage()).getTools(null, model)
+    val tools = conversationTools(user, images, model)
     val defaultPrinter = MessagePrinter(
         reasoningColor = SimpleAnsiColor.CYAN,
         messageColor = SimpleAnsiColor.CYAN,
