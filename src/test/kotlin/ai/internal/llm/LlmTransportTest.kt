@@ -26,6 +26,185 @@ class LlmTransportTest
     fun setUp() = initializeTestEnvironment()
 
     @Test
+    fun `non-streaming tool roundtrip replays reasoning and original call ids`() = runBlocking {
+        val calls = mutableListOf<String>()
+        val first = completed(listOf(reasoning(), functionCall("a", "first")), 7, 3)
+        val second = completed(listOf(message("Finished")), 11, 5)
+        MockServer { index, request ->
+            assertEquals("POST", request.method)
+            assertEquals("/v1/responses", request.path)
+            assertEquals("Bearer unit-test-key", request.authorization)
+            assertFalse("messages" in request.body)
+            assertFalse("max_tokens" in request.body)
+            assertEquals(120, request.body.getValue("max_output_tokens").jsonPrimitive.int)
+            assertEquals(false, request.body.getValue("store").jsonPrimitive.boolean)
+            assertTrue(JsonPrimitive("reasoning.encrypted_content") in request.body.getValue("include").jsonArray)
+            val tool = request.body.getValue("tools").jsonArray.single().jsonObject
+            assertEquals("function", tool.getValue("type").jsonPrimitive.content)
+            assertEquals("echo", tool.getValue("name").jsonPrimitive.content)
+            assertEquals(false, tool.getValue("strict").jsonPrimitive.boolean)
+            assertFalse("function" in tool)
+            if (index == 0) MockResponse(first)
+            else
+            {
+                assertEquals(1, index)
+                val input = request.body.getValue("input").jsonArray.map { it.jsonObject }
+                assertEquals("encrypted-test-state", input.single { it["type"] == JsonPrimitive("reasoning") }["encrypted_content"]?.jsonPrimitive?.content)
+                val call = input.single { it["type"] == JsonPrimitive("function_call") }
+                assertEquals("call_a", call["call_id"]?.jsonPrimitive?.content)
+                assertEquals("{\"text\":\"first\"}", call["arguments"]?.jsonPrimitive?.content)
+                val output = input.single { it["type"] == JsonPrimitive("function_call_output") }
+                assertEquals("call_a", output["call_id"]?.jsonPrimitive?.content)
+                assertEquals("echo:first", output["output"]?.jsonPrimitive?.content)
+                MockResponse(second)
+            }
+        }.use { server ->
+            val result = withTimeout(10_000) {
+                sendAiRequest(server.model(), ChatMessages(Role.USER, "echo first"), maxTokens = 120,
+                    tools = listOf(echoTool(calls)), stream = false)
+            }
+            server.verify()
+            assertIs<AiResult.Success>(result)
+            assertEquals(listOf("first"), calls)
+            assertEquals(2, server.requests.size)
+            assertEquals("Finished", result.messages.last().content.toText())
+            assertEquals(TokenUsage(completionTokens = 8, promptTokens = 18, totalTokens = 26), result.usage)
+            assertEquals("call_a", result.messages.first().toolCalls.single().id)
+            assertEquals(first["output"]?.jsonArray?.toList(), result.messages.first().responsesOutput)
+        }
+    }
+
+    @Test
+    fun `streaming parallel calls execute once after completed and continue without DONE sentinel`() = runBlocking {
+        val calls = mutableListOf<String>()
+        val slices = mutableListOf<StreamAiResponseSlice>()
+        val first = completed(listOf(reasoning("Planning"), functionCall("a", "one"), functionCall("b", "two")), 7, 3)
+        val final = completed(listOf(message("done")), 11, 5)
+        MockServer { index, request ->
+            assertTrue(request.body.getValue("stream").jsonPrimitive.boolean)
+            when (index)
+            {
+                0 -> MockResponse.sse(
+                    event("response.created", "response" to buildJsonObject { put("status", "in_progress") }),
+                    delta("response.reasoning_summary_text.delta", "Planning", outputIndex = 0, itemId = "rs_test"),
+                    event("response.output_item.added", "output_index" to JsonPrimitive(1), "item" to functionCall("a", "").let {
+                        JsonObject(it + ("arguments" to JsonPrimitive("")))
+                    }),
+                    delta("response.function_call_arguments.delta", "{\"text\":", outputIndex = 1, itemId = "fc_a"),
+                    event("response.output_item.added", "output_index" to JsonPrimitive(2), "item" to functionCall("b", "").let {
+                        JsonObject(it + ("arguments" to JsonPrimitive("")))
+                    }),
+                    delta("response.function_call_arguments.delta", "{\"text\":\"two\"}", outputIndex = 2, itemId = "fc_b"),
+                    delta("response.function_call_arguments.delta", "\"one\"}", outputIndex = 1, itemId = "fc_a"),
+                    event("response.output_item.done", "output_index" to JsonPrimitive(1), "item" to functionCall("a", "one")),
+                    event("response.output_item.done", "output_index" to JsonPrimitive(2), "item" to functionCall("b", "two")),
+                    event("response.completed", "response" to first),
+                )
+                1 -> {
+                    val input = request.body.getValue("input").jsonArray.map { it.jsonObject }
+                    assertEquals(listOf("call_a", "call_b"), input.filter { it["type"] == JsonPrimitive("function_call_output") }
+                        .map { it.getValue("call_id").jsonPrimitive.content })
+                    MockResponse.sse(
+                        delta("response.output_text.delta", "do"),
+                        delta("response.output_text.delta", "ne"),
+                        event("response.completed", "response" to final),
+                    )
+                }
+                else -> error("Unexpected request $index")
+            }
+        }.use { server ->
+            val result = withTimeout(10_000) {
+                sendAiRequest(server.model(), ChatMessages(Role.USER, "echo twice"),
+                    tools = listOf(echoTool(calls)), stream = true, onReceive = slices::add)
+            }
+            server.verify()
+            assertIs<AiResult.Success>(result)
+            assertEquals(listOf("one", "two"), calls)
+            assertEquals(2, server.requests.size)
+            assertEquals("done", result.messages.last().content.toText())
+            assertEquals("done", slices.filterIsInstance<StreamAiResponseSlice.Message>().joinToString("") { it.content })
+            assertEquals("Planning", slices.filterIsInstance<StreamAiResponseSlice.Message>().joinToString("") { it.reasoningContent })
+            assertEquals(listOf("call_a", "call_b"), slices.filterIsInstance<StreamAiResponseSlice.ToolCall>().map { it.id })
+            assertEquals(TokenUsage(completionTokens = 8, promptTokens = 18, totalTokens = 26), result.usage)
+        }
+    }
+
+    @Test
+    fun `truncated stream retains partial text and never executes a pending tool`() = runBlocking {
+        val calls = mutableListOf<String>()
+        MockServer { _, _ -> MockResponse.sse(
+            delta("response.output_text.delta", "partial"),
+            event("response.output_item.done", "output_index" to JsonPrimitive(1), "item" to functionCall("a", "unsafe")),
+        ) }.use { server ->
+            val result = withTimeout(10_000) {
+                sendAiRequest(server.model(), ChatMessages(Role.USER, "test truncation"),
+                    tools = listOf(echoTool(calls)), stream = true)
+            }
+            server.verify()
+            assertIs<AiResult.UnknownError>(result)
+            assertTrue(calls.isEmpty())
+            assertEquals("partial", result.messages.single().content.toText())
+        }
+    }
+
+    @Test
+    fun `failed and incomplete responses do not execute tools in either transport`() = runBlocking {
+        for (stream in listOf(false, true)) for (status in listOf("failed", "incomplete"))
+        {
+            val calls = mutableListOf<String>()
+            val response = JsonObject(completed(listOf(functionCall("a", "unsafe"))) + mapOf(
+                "status" to JsonPrimitive(status),
+                "error" to buildJsonObject { put("code", "test_failure"); put("message", "fixture failure") },
+                "incomplete_details" to buildJsonObject { put("reason", "max_output_tokens") },
+            ))
+            MockServer { _, _ ->
+                if (stream) MockResponse.sse(event("response.$status", "response" to response))
+                else MockResponse(response)
+            }.use { server ->
+                val result = withTimeout(10_000) {
+                    sendAiRequest(server.model(), ChatMessages(Role.USER, "test terminal failure"),
+                        tools = listOf(echoTool(calls)), stream = stream)
+                }
+                server.verify()
+                assertIs<AiResult.UnknownError>(result, "stream=$stream, status=$status")
+                assertTrue(calls.isEmpty(), "stream=$stream, status=$status")
+            }
+        }
+    }
+
+    @Test
+    fun `non-streaming rate limit is classified after retries`() = runBlocking {
+        MockServer { _, _ -> MockResponse(
+            buildJsonObject { putJsonObject("error") { put("message", "rate limited"); put("type", "rate_limit_error") } },
+            status = 429,
+        ) }.use { server ->
+            val result = withTimeout(10_000) {
+                sendAiRequest(server.model(), ChatMessages(Role.USER, "hello"), stream = false)
+            }
+            server.verify()
+            assertIs<AiResult.TooManyRequests>(result)
+            assertTrue(server.requests.isNotEmpty())
+        }
+    }
+
+    @Test
+    fun `successful retry does not inherit earlier HTTP failure`() = runBlocking {
+        MockServer { index, _ ->
+            if (index == 0) MockResponse(
+                buildJsonObject { putJsonObject("error") { put("message", "temporarily unavailable") } }, status = 503)
+            else MockResponse(completed(listOf(message("Recovered"))))
+        }.use { server ->
+            val result = withTimeout(10_000) {
+                sendAiRequest(server.model(), ChatMessages(Role.USER, "hello"), stream = false)
+            }
+            server.verify()
+            assertIs<AiResult.Success>(result)
+            assertEquals("Recovered", result.messages.single().content.toText())
+            assertEquals(2, server.requests.size)
+        }
+    }
+
+    @Test
     fun `legacy configuration still sends Chat Completions body`() = runBlocking {
         MockServer { _, request ->
             assertEquals("/v1/chat/completions", request.path)
@@ -255,6 +434,52 @@ class LlmTransportTest
         AiToolInfo.ToolResult(Content("echo:${args.text}"))
     }
 
+    private fun reasoning(summary: String = "") = buildJsonObject {
+        put("type", "reasoning")
+        put("id", "rs_test")
+        put("encrypted_content", "encrypted-test-state")
+        putJsonArray("summary") {
+            if (summary.isNotEmpty()) add(buildJsonObject { put("type", "summary_text"); put("text", summary) })
+        }
+    }
+
+    private fun functionCall(id: String, text: String) = buildJsonObject {
+        put("type", "function_call")
+        put("id", "fc_$id")
+        put("call_id", "call_$id")
+        put("name", "echo")
+        put("arguments", buildJsonObject { put("text", text) }.toString())
+        put("status", "completed")
+    }
+
+    private fun message(text: String) = buildJsonObject {
+        put("type", "message")
+        put("id", "msg_test")
+        put("role", "assistant")
+        put("status", "completed")
+        putJsonArray("content") {
+            add(buildJsonObject { put("type", "output_text"); put("text", text); put("annotations", JsonArray(emptyList())) })
+        }
+    }
+
+    private fun completed(output: List<JsonObject>, inputTokens: Int = 2, outputTokens: Int = 3) = buildJsonObject {
+        put("id", "resp_test")
+        put("object", "response")
+        put("status", "completed")
+        put("output", JsonArray(output))
+        putJsonObject("usage") {
+            put("input_tokens", inputTokens)
+            put("output_tokens", outputTokens)
+            put("total_tokens", inputTokens + outputTokens)
+        }
+    }
+
+    private fun event(type: String, vararg fields: Pair<String, JsonElement>) = JsonObject(mapOf("type" to JsonPrimitive(type)) + fields)
+
+    private fun delta(type: String, text: String, outputIndex: Int = 0, itemId: String = "msg_test") = event(type,
+        "delta" to JsonPrimitive(text), "output_index" to JsonPrimitive(outputIndex), "item_id" to JsonPrimitive(itemId),
+        "content_index" to JsonPrimitive(0), "summary_index" to JsonPrimitive(0))
+
     private data class RecordedRequest(val method: String, val path: String, val authorization: String?, val body: JsonObject)
 
     private data class MockResponse(val body: String, val status: Int = 200, val contentType: String = "application/json")
@@ -263,6 +488,11 @@ class LlmTransportTest
 
         companion object
         {
+            fun sse(vararg events: JsonObject) = MockResponse(
+                events.joinToString("") { "event: ${it.getValue("type").jsonPrimitive.content}\ndata: $it\n\n" },
+                contentType = "text/event-stream",
+            )
+
             fun chatSse(vararg chunks: JsonObject, done: Boolean = true) = MockResponse(
                 chunks.joinToString("") { "data: $it\n\n" } + if (done) "data: [DONE]\n\n" else "",
                 contentType = "text/event-stream",
@@ -301,6 +531,9 @@ class LlmTransportTest
             start()
         }
         val url = "http://127.0.0.1:${server.address.port}"
+
+        fun model() = AiConfig.LlmModel(url = "$url/v1/responses", model = "test-model", key = listOf("unit-test-key"),
+            apiType = AiConfig.ApiType.RESPONSES)
 
         fun chatModel() = AiConfig.LlmModel(url = "$url/v1/chat/completions", model = "test-model", key = listOf("unit-test-key"))
 

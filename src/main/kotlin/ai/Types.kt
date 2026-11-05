@@ -283,6 +283,10 @@ data class ChatMessage(
     val reasoningContent: Content = Content(),
     @SerialName("tool_calls")
     val toolCalls: List<ToolCall> = emptyList(),
+    // Keep typed output (including encrypted reasoning) for stateless Responses continuations.
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    @SerialName("responses_output")
+    val responsesOutput: List<JsonObject> = emptyList(),
 )
 {
     constructor(role: Role, content: String, reasoningContent: String = ""):
@@ -296,7 +300,8 @@ data class ChatMessage(
     }
 
     infix fun canPlus(other: ChatMessage): Boolean =
-        this.role == other.role && (this.role is Role.ASSISTANT || this.role is Role.TOOL)
+        this.role == other.role && (this.role is Role.ASSISTANT || this.role is Role.TOOL) &&
+            responsesOutput.isEmpty() == other.responsesOutput.isEmpty()
     operator fun plus(other: ChatMessage): ChatMessage
     {
         if (!(this canPlus other)) error("Cannot combine messages with different roles, tool call IDs, or showing types")
@@ -305,10 +310,11 @@ data class ChatMessage(
             content = content + other.content,
             reasoningContent = reasoningContent + other.reasoningContent,
             toolCalls = toolCalls + other.toolCalls,
+            responsesOutput = responsesOutput + other.responsesOutput,
         )
     }
 
-    fun isBlank(): Boolean = content.isEmpty() && reasoningContent.isEmpty() && toolCalls.isEmpty()
+    fun isBlank(): Boolean = content.isEmpty() && reasoningContent.isEmpty() && toolCalls.isEmpty() && responsesOutput.isEmpty()
 
     @Serializable
     data class ToolCall(

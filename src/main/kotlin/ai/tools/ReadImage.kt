@@ -104,7 +104,7 @@ class ReadImage(private val vlm: AiConfig.LlmModel?): AiToolSet.ToolProvider<Any
             sendAiRequest(
                 model = vlm!!,
                 messages = ChatMessages(Role.USER to content),
-                temperature = 0.1,
+                temperature = if (vlm.apiType == AiConfig.ApiType.CHAT_COMPLETIONS) 0.1 else null,
                 stream = true,
                 onReceive = {
                     if (it is StreamAiResponseSlice.Message)

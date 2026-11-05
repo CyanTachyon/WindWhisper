@@ -4,7 +4,7 @@
 ## 简要功能说明
 
 - 支持所有使用Discourse论坛系统的网站
-- 支持具备原生函数调用能力的OpenAI API兼容模型
+- 支持通过OpenAI Responses API或Chat Completions进行原生函数调用的模型
 - AI可以阅读论坛中的帖子，并回复、点赞。同时在不同的帖子间保持记忆连续性。
 - 每当收到一个notification时，如果该notification与某一topic相关，AI会自动处理该topic。
 - [可选]让AI可以联网搜索、读取url内容等
@@ -27,7 +27,7 @@ gradle build
 ### 步骤2：准备工作
 1. 在目标论坛注册一个账户，并记下用户名和密码。
 2. 选择兼容OpenAI API且支持原生函数调用的模型和服务商，并获取API Key。
-3. 该项目网络搜索工具依赖[tavily](https://tavily.com)，如果你想让AI可以进行网络，需注册一个tavily账户并获取API Key。该步骤可选。
+3. 默认的联网搜索工具使用[Tavily](https://tavily.com)；如需启用这些工具，需注册Tavily账户并获取API Key。该步骤可选。
 
 ### 步骤3：初始化
 使用以下命令启动WindWhisper：
@@ -69,16 +69,37 @@ webSearchKey:
     "your_tavily_api_key" # 可选，留空则不启用网络搜索功能
   ]
 model:
+  apiType: chat_completions # 可选，现有配置默认使用此协议
   url: "https://your.openai.api/endpoint/v1/chat/completions" # 注意需要完整URL，即包含/v1/chat/completions
   key: ["your openai_api_key"] # 如果填写多个，将每次随机选择一个使用。
   model: "gpt-4" # 选择你想使用的模型
-  imageable: false # 是否支持视觉能力，目前该功能未实现
+  visible: false # 模型是否支持图片输入
   customRequestParms: # 可选，自定义体字段
     temperature: 0.7
     top_p: 0.9
     presence_penalty: 0
     frequency_penalty: 0
 ```
+
+使用OpenAI Responses API时，将`model`部分替换为：
+
+```yaml
+model:
+  apiType: responses
+  url: "https://api.openai.com/v1/responses"
+  key: ["your_openai_api_key"]
+  model: "gpt-6-astra" # 使用你的API账户可访问的模型
+  visible: true
+  customRequestParms:
+    reasoning:
+      effort: low
+```
+
+每个模型可以独立选择协议；可选的`vlmModel`使用相同配置字段，并且必须设置`visible: true`。不填写`apiType`的旧配置继续使用Chat Completions。`url`必须填写对应协议的完整接口地址，修改`apiType`不会自动改写URL。
+
+OpenAI仍然支持Chat Completions。GPT-6 Astra的工具调用要求使用Responses，因此本项目调用论坛工具时需选择Responses。详见官方[Responses迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)和[GPT-6指南](https://developers.openai.com/api/docs/guides/latest-model)。
+
+`customRequestParms`使用所选API的原生请求字段。Responses通过`max_output_tokens`限制输出，通过`reasoning.effort`设置推理强度；请勿复制Chat Completions的`max_tokens`、`presence_penalty`、`frequency_penalty`、`stop`或`thinking_budget`等字段。GPT-6启用推理时不要设置`temperature`和`top_p`。Responses请求默认设置`store: false`；WindWhisper在本地保留并逐轮回传输出项和工具结果，不使用`previous_response_id`。
 
 [可选]编辑`prompt.md`，这是系统提示词，你可以根据需要修改它以调整AI的行为。
 [可选]编辑`data/memory.md`，这是存储AI记忆的文件，你可以预先填入一些信息以影响AI的行为。

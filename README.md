@@ -4,7 +4,7 @@ An AI bot based on the Discourse forum system. This project aims to add a person
 ## Brief Feature Description
 
 - Supports all websites using the Discourse forum system
-- Supports OpenAI API-compatible models with native function calling
+- Supports models with native function calling through OpenAI Responses API or Chat Completions
 - The AI can read posts on the forum, reply, and give likes. It maintains memory continuity across different posts.
 - Upon receiving a notification, if the notification is related to a specific topic, the AI will automatically process that topic.
 - [Optional]Enables the AI to perform web searches, read URL content, etc.
@@ -26,8 +26,8 @@ After compilation completes, the `WindWhisper.jar` file will be generated in the
 
 ### Step 2: Preparation
 1. Register an account on the target forum and note down the username and password.
-2. Choose an OpenAI API-compatible model and provider with native function calling, and obtain an API key.
-3. This project's web search tool relies on [tavily](https://tavily.com). If you want the AI to be able to search the web, you need to register a tavily account and obtain an API Key. This step is optional.
+2. Choose an OpenAI API-compatible model and provider that support native function calling, then obtain an API Key.
+3. The default web search tools use [Tavily](https://tavily.com). To enable them, register a Tavily account and obtain an API key. This step is optional.
 
 ### Step 3: Initialization
 Start WindWhisper using the following command:
@@ -69,16 +69,37 @@ webSearchKey:
     "your_tavily_api_key" # Optional, leave empty to disable web search functionality
   ]
 model:
+  apiType: chat_completions # Optional; this is the default for existing configurations
   url: "https://your.openai.api/endpoint/v1/chat/completions" # Note: full URL is required, including /v1/chat/completions
   key: ["your openai_api_key"] # If multiple keys are provided, one will be randomly selected for each use.
   model: "gpt-4" # Choose the model you want to use
-  imageable: false # Whether visual capabilities are supported. This feature is not currently implemented
+  visible: false # Whether the model supports image inputs
   customRequestParms: # Optional, custom request body fields
     temperature: 0.7
     top_p: 0.9
     presence_penalty: 0
     frequency_penalty: 0
 ```
+
+To use OpenAI Responses API, replace the `model` section with:
+
+```yaml
+model:
+  apiType: responses
+  url: "https://api.openai.com/v1/responses"
+  key: ["your_openai_api_key"]
+  model: "gpt-6-astra" # Use a model available to your API account
+  visible: true
+  customRequestParms:
+    reasoning:
+      effort: low
+```
+
+Choose the protocol separately for each model: the optional `vlmModel` section accepts the same fields and must have `visible: true`. Existing configurations without `apiType` continue to use Chat Completions. Always supply the complete URL for the selected protocol; changing `apiType` does not rewrite the URL.
+
+Chat Completions remains supported by OpenAI. GPT-6 Astra's tool calling requires Responses, which is needed for this bot's forum tools. See the official [Responses migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) and [GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model).
+
+`customRequestParms` supplies native request body fields for the selected API. For Responses, use `max_output_tokens` for an output limit and `reasoning.effort` for reasoning effort; do not copy Chat Completions fields such as `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, or `thinking_budget`. Omit `temperature` and `top_p` for GPT-6 reasoning. Responses requests default to `store: false`; WindWhisper replays output items and tool results locally between turns, without `previous_response_id`.
 
 [Optional]Edit `prompt.md`. This is the system prompt. You can modify it as needed to adjust the AI's behavior.
 [Optional]Edit `data/memory.md`. This file stores the AI's memory. You can pre-fill it with some information to influence the AI's behavior.

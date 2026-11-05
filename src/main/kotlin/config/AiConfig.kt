@@ -18,6 +18,16 @@ data class AiConfig(
 )
 {
     @Serializable
+    enum class ApiType
+    {
+        @SerialName("chat_completions")
+        CHAT_COMPLETIONS,
+
+        @SerialName("responses")
+        RESPONSES,
+    }
+
+    @Serializable
     data class LlmModel(
         val url: String = "https://api.deepseek.com/chat/completions",
         val model: String = "deepseek-reasoner",
@@ -28,7 +38,9 @@ data class AiConfig(
         val thinkingBudget: Int? = null,
         val key: List<String> = listOf("your api key"),
 
-        val customRequestParms: YamlMap? = null
+        val customRequestParms: YamlMap? = null,
+        @YamlComment("API协议：chat_completions（默认）或responses；url需填写对应接口的完整地址")
+        val apiType: ApiType = ApiType.CHAT_COMPLETIONS,
     )
     {
         val semaphore by lazy { Semaphore(maxConcurrency) }

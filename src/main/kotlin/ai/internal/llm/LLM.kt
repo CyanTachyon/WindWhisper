@@ -372,7 +372,9 @@ suspend fun sendAiRequest(
             }
 
             val url = context.model.url
-            val body = AiRequest(
+            val body = if (context.model.apiType == AiConfig.ApiType.RESPONSES)
+                buildResponsesRequest(context, beforeLlmRequestContext.requestMessage, stream)
+            else AiRequest(
                 model = context.model.model,
                 messages = beforeLlmRequestContext.requestMessage.toRequestMessages(),
                 stream = stream,
@@ -405,7 +407,9 @@ suspend fun sendAiRequest(
                 repeat(aiConfig.retry)
                 {
                     currentCoroutineContext().ensureActive()
-                    val tmp = sendRequest(url, context.model.key.random(), body, stream, onReceive)
+                    val tmp = if (context.model.apiType == AiConfig.ApiType.RESPONSES)
+                        sendResponsesRequest(url, context.model.key.random(), body, stream, onReceive)
+                    else sendRequest(url, context.model.key.random(), body, stream, onReceive)
                     if (tmp.error is CancellationException) throw tmp.error!!
                     if (tmp.error == null && !tmp.message.isBlank()) return@run tmp
                     if (tmp.error == null) tmp.error = UnknownAiResponseException(message = "AI请求返回空响应")
@@ -469,6 +473,64 @@ private fun Throwable.httpStatus(): Int? = when (this)
     is SSEClientException -> response?.status?.value
     is AiRetryFailedException -> exceptions.lastOrNull()?.httpStatus()
     else -> cause?.takeUnless { it === this }?.httpStatus()
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+private suspend fun sendResponsesRequest(
+    url: String,
+    key: String,
+    body: JsonObject,
+    stream: Boolean,
+    onReceive: suspend (StreamAiResponseSlice) -> Unit,
+): RequestResult
+{
+    logger.config("Responses API请求$url : ${contentNegotiationJson.encodeToString(body)}")
+    val state = ResponsesStreamState(bufferTextUntilCompleted =
+        (body["tools"] as? JsonArray).orEmpty().any { (it as? JsonObject)?.isResponsesWebSearchTool() == true })
+    return try
+    {
+        if (!stream)
+        {
+            val response = withTimeout(aiConfig.timeout) {
+                defaultAiClient.post(url) {
+                    bearerAuth(key)
+                    contentType(ContentType.Application.Json)
+                    accept(ContentType.Application.Json)
+                    setBody(body)
+                }.let { it.status to it.bodyAsText() }
+            }
+            if (!response.first.isSuccess()) throw AiHttpException(response.first.value, response.second)
+            parseResponsesResponse(contentNegotiationJson.parseToJsonElement(response.second).jsonObject)
+        }
+        else
+        {
+            streamAiClient.sse(url, {
+                method = HttpMethod.Post
+                bearerAuth(key)
+                contentType(ContentType.Application.Json)
+                accept(ContentType.Text.EventStream)
+                setBody(contentNegotiationJson.encodeToString(body))
+            }) {
+                if (!call.response.status.isSuccess())
+                    throw AiHttpException(call.response.status.value, call.response.bodyAsText())
+                incoming.transformWhile { event ->
+                    val data = event.data
+                    if (!data.isNullOrBlank() && data.trim() != "[DONE]")
+                    {
+                        val parsed = contentNegotiationJson.parseToJsonElement(data).jsonObject
+                        state.accept(parsed, onReceive)
+                    }
+                    emit(Unit)
+                    !state.isTerminal
+                }.collect { }
+            }
+            state.result()
+        }
+    }
+    catch (e: Throwable)
+    {
+        state.result(e)
+    }
 }
 
 private fun checkChatFinishReason(reason: AiResponse.FinishReason?)
