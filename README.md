@@ -1,13 +1,15 @@
 # WindWhisper
 An AI bot based on the Discourse forum system. This project aims to add a personified user to the forum, rather than an AI assistant. Users can interact with this user to obtain AI-generated content.
 
+This experimental `codex/responses-native` branch uses the OpenAI Responses API throughout. Each forum notification adds a user message to one ongoing server-side response chain; OpenAI manages its context and automatic compaction.
+
 ## Brief Feature Description
 
 - Supports all websites using the Discourse forum system
-- Supports models with native function calling through OpenAI Responses API or Chat Completions
-- The AI can read posts on the forum, reply, and give likes. It maintains memory continuity across different posts.
+- Uses Responses API native function calling, stored responses, and automatic context compaction
+- The AI reads posts, replies, and gives likes while continuing the same conversation across notifications.
 - Upon receiving a notification, if the notification is related to a specific topic, the AI will automatically process that topic.
-- [Optional]Enables the AI to perform web searches, read URL content, etc.
+- Supports hosted web search and image generation, image/PDF reading, and uploading generated images into forum replies.
 
 ## Installation & Usage
 
@@ -15,19 +17,20 @@ An AI bot based on the Discourse forum system. This project aims to add a person
 Ensure you have Java 17 installed. Lower or higher versions are not supported.
 
 ### Step 1
-Go to the [Releases](https://github.com/CyanTachyon/WindWhisper/releases) page and download the latest version of the `WindWhisper.jar` file.
+Build this branch from source. Existing releases may still use the previous architecture.
 
 #### Self-compilation
 If you wish to compile it yourself, ensure you have a Gradle and Java 17 environment. Then clone this project and run the following command:
 ```bash
-gradle build
+git switch codex/responses-native
+./gradlew buildFatJar
 ```
 After compilation completes, the `WindWhisper.jar` file will be generated in the `build/libs` directory.
 
 ### Step 2: Preparation
 1. Register an account on the target forum and note down the username and password.
-2. Choose an OpenAI API-compatible model and provider that support native function calling, then obtain an API Key.
-3. Choose a web search provider if needed. Tavily search requires a [Tavily](https://tavily.com) API Key; Responses hosted search uses your model provider and needs no Tavily key. Search can also be disabled.
+2. Obtain an API key for a model/provider supporting Responses, stored response continuation, and server-side compaction. The default endpoint is OpenAI.
+3. Enable hosted web search and image generation if your account and selected model support them. No separate search API key is needed.
 
 ### Step 3: Initialization
 Start WindWhisper using the following command:
@@ -69,65 +72,56 @@ proxy:
   # password: "your_proxy_password"
 ```
 
-The default `proxy: null` uses direct connections. This setting covers the forum, model APIs (including streaming), Tavily, and image/PDF/video downloads; destination names are resolved by the proxy. Responses hosted search runs on the provider's servers; the local proxy covers requests to the Responses API. Restart the application after changing proxy settings; `config reload` does not update existing clients. A failed proxy connection returns an error without falling back to a direct connection. Configure the username and password together, using 1 to 255 ISO-8859-1 characters each.
+The default `proxy: null` uses direct connections. This setting covers the forum, Responses API (including streaming), and image/PDF downloads; destination names are resolved by the proxy. Responses hosted search runs on the provider's servers; the local proxy covers requests to the Responses API. Restart the application after changing proxy settings; `config reload` does not update existing clients. A failed proxy connection returns an error without falling back to a direct connection. Configure the username and password together, using 1 to 255 ISO-8859-1 characters each.
 
 Edit `configs/ai.yml`:
 ```yaml
-# Timeout for AI requests in milliseconds
+# Timeout for non-streaming API requests, in milliseconds
 timeout: 120000
-# Number of retries for AI service
 retry: 3
-webSearchKey:
-  [
-    "your_tavily_api_key" # Optional; use webSearchKey: [] to disable Tavily tools
-  ]
 model:
-  apiType: chat_completions # Optional; this is the default for existing configurations
-  search: tavily # tavily, responses, or none
-  url: "https://your.openai.api/endpoint/v1/chat/completions" # Note: full URL is required, including /v1/chat/completions
-  key: ["your openai_api_key"] # If multiple keys are provided, one will be randomly selected for each use.
-  model: "gpt-4" # Choose the model you want to use
-  visible: false # Whether the model supports image inputs
-  customRequestParms: # Optional, custom request body fields
-    temperature: 0.7
-    top_p: 0.9
-    presence_penalty: 0
-    frequency_penalty: 0
-```
-
-To use OpenAI Responses API, replace the `model` section with:
-
-```yaml
-model:
-  apiType: responses
-  search: responses
   url: "https://api.openai.com/v1/responses"
+  model: "gpt-6-astra" # Use a model available to your account
   key: ["your_openai_api_key"]
-  model: "gpt-6-astra" # Use a model available to your API account
   visible: true
+  compactThreshold: 100000
+  webSearch: true
+  imageGeneration: true
   customRequestParms:
     reasoning:
       effort: low
 ```
 
-Choose the protocol separately for each model: the optional `vlmModel` section accepts the same fields and must have `visible: true`. Existing configurations without `apiType` continue to use Chat Completions. Always supply the complete URL for the selected protocol; changing `apiType` does not rewrite the URL.
+`url` must be the complete Responses endpoint. `compactThreshold` is the token threshold for server-side automatic compaction; it must be at least 1000 and should leave room below the model's context limit. `webSearch` and `imageGeneration` control the hosted tools. `visible` controls whether the bot exposes its image/PDF reading tool. The conversation consistently uses the first entry in `key`; it does not randomly switch credentials between turns.
 
-Select web search with `model.search`:
+`customRequestParms` accepts native Responses options such as `reasoning.effort` and `max_output_tokens`. The application owns input, continuation, storage, and compaction settings. Use the dedicated configuration fields for hosted search and image generation. Hosted-search citations appear as Markdown links; answer text is displayed after completion so those links can be included.
 
-| Value | Behavior | Requirements |
-| --- | --- | --- |
-| `tavily` | Registers the Tavily search, extract, and crawl tools. | At least one key in the existing top-level `webSearchKey` list. Works with either API protocol. |
-| `responses` | Enables the Responses API's hosted web search, without registering Tavily tools. | `apiType: responses` and a model/provider supporting hosted web search. No Tavily key needed. |
-| `none` | Disables Tavily search, extract, and crawl tools, and hosted web search. | None. |
+Edit `prompt.txt` to customize the bot's personality and standing instructions. These instructions are sent with each API request; notification details arrive separately as user messages.
 
-Omitting `model.search` preserves Tavily tools for the main model; an empty `webSearchKey: []` disables those tools. Select hosted search through this field, not `customRequestParms.tools`. Hosted search citations are rendered as Markdown links. When hosted search is enabled, answer text is displayed after the response completes so citations can be included; reasoning summaries still stream when provided by the API.
+### Continuous conversation and migration
 
-Chat Completions remains supported by OpenAI. GPT-6 Astra's tool calling requires Responses, which is needed for this bot's forum tools. See the official [Responses migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) and [GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model).
+This branch sends `store: true`, continues with `previous_response_id`, and enables `context_management` compaction. It does not use a separate Conversations API object or resend the whole conversation history. See the official [conversation state](https://developers.openai.com/api/docs/guides/conversation-state) and [compaction](https://developers.openai.com/api/docs/guides/compaction) documentation.
 
-`customRequestParms` supplies native request body fields for the selected API. For Responses, use `max_output_tokens` for an output limit and `reasoning.effort` for reasoning effort; do not copy Chat Completions fields such as `max_tokens`, `presence_penalty`, `frequency_penalty`, `stop`, or `thinking_budget`. Omit `temperature` and `top_p` for GPT-6 reasoning. Responses requests default to `store: false`; WindWhisper replays output items and tool results locally between turns, without `previous_response_id`.
+`data/responses-session.json` holds the response ID and notification/tool execution state needed for continuation and recovery. It is control state, not a model-written summary. Keep it when restarting the program. Changing the forum identity, API endpoint, or first API key pauses new notification processing; restart with matching session data, and use a separate working directory for a different account. The prior `data/memory.md` is no longer read or updated, and existing user files are not deleted automatically.
 
-[Optional]Edit `prompt.md`. This is the system prompt. You can modify it as needed to adjust the AI's behavior.
-[Optional]Edit `data/memory.md`. This file stores the AI's memory. You can pre-fill it with some information to influence the AI's behavior.
+For an existing installation, update `configs/ai.yml` to the example above and remove the old `apiType`, `search`, `webSearchKey`, `vlmModel`, and `thinking_budget` fields. Update your existing `prompt.txt` as well: remove instructions to output or reconstruct a complete notebook and remove `${self_memory}` / `${topic_id}` placeholders. The bundled default prompt only initializes missing files, so it will not overwrite an existing prompt.
+
+### Expiration and manual recovery
+
+OpenAI stores response objects for 30 days by default, so `previous_response_id` may become unavailable after a long idle period. This branch's local checkpoint cannot reconstruct expired remote context, and the application does not silently discard it to start another conversation. See the official [response retention documentation](https://developers.openai.com/api/docs/guides/conversation-state).
+
+If a pending turn has a non-null `executingToolId`, the process stopped before a tool result was checkpointed. A write operation may already have reached the forum, so its outcome is unknown. The application stops recovery instead of repeating that operation. Check the forum and logs before manually recovering; do not blindly clear the marker or retry a post, reaction, or image upload. Completed notifications whose read acknowledgement failed are kept in a separate control ledger and retried without running the model again, even if they no longer appear in the current unread page.
+
+To deliberately start a new conversation after expiration or an unresolved interrupted turn:
+
+1. Stop WindWhisper. Confirm the actual data directory from your current launch configuration: `-dataDir=/path` overrides it; otherwise it is `data` under `-workDir` (the current working directory by default).
+2. Inspect the pending notification and recent forum actions, using the checkpoint and logs to identify them. Resolve any uncertain write result manually, and mark notifications already handled as read in the forum before restarting. Resetting the checkpoint also removes its completed-notification ledger, so unread notifications can be processed again.
+3. Back up `responses-session.json` from that data directory, then move or delete only the active `responses-session.json`. For example, rename it to `responses-session.backup.json`. Keep `generated-images/`, your configuration, and other user data.
+4. Restart with the intended forum account and Responses credentials. The missing checkpoint starts a fresh conversation with the current `prompt.txt`; it does not recover the old conversation. Only reset after reviewing the forum state as above.
+
+### Generated images in forum posts
+
+The model can invoke the hosted `image_generation` tool. WindWhisper saves completed images under `data/generated-images/` and gives the model their image IDs. The model calls `upload_generated_image` with an image ID and destination topic ID to obtain forum Markdown, then includes that Markdown in `send_post`. Generating an image alone does not publish a forum post. Forum access restrictions still apply.
 
 ### Step 4: Running
 Run the following command again to start WindWhisper:
@@ -147,7 +141,7 @@ The program should connect to the forum and start working. You can see log outpu
 ## Brief Working Principle Introduction
 
 WindWhisper repeats the following steps:
-1. Check the forum's notifications. If there is a new notification and it is associated with a topic, execute the following steps.
-2. Provide the AI with the prompt, memory, and the pending topicID as part of the prompt. Also provide tools to get the topic, get posts, like, reply, and the web search provider selected by `model.search`.
-3. The AI will read the posts through the tools and interact.
-4. After the interaction ends, the AI needs to output new memory content, which the program will save to `data/memory.md`.
+1. Read unread forum notifications and process them serially.
+2. Append a user message containing the notification ID and topic ID to the existing response chain, with forum tools and enabled hosted tools available.
+3. Execute requested forum tools and send their results back to the same response chain until the model finishes.
+4. Persist continuation/execution state and acknowledge the completed notification. The next notification continues the conversation, with context compaction handled by the Responses API.
