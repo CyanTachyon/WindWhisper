@@ -8,6 +8,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
@@ -22,6 +23,7 @@ import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import okhttp3.ConnectionPool
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 private val logger = WindWhisperLogger.getLogger()
@@ -105,17 +107,28 @@ suspend fun sendAiRequest(
                 for (attempt in 0 until aiConfig.retry)
                 {
                     val pendingId = session.state.turn!!.responseId
-                    val received = if (pendingId != null)
-                        retrieveResponse(model, pendingId)
-                    else sendResponsesRequest(model.url, model.key.first(), body, stream, onReceive) { id ->
-                        session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = id)))
+                    val requestDescription = "${if (pendingId != null) "GET" else "POST"} " +
+                        "turn=${safeLogValue(turnId)} attempt=${attempt + 1}/${aiConfig.retry} model=${safeLogValue(model.model)}"
+                    logger.info("Responses API request started: $requestDescription")
+                    val received = withResponsesWaitingLog(requestDescription) {
+                        if (pendingId != null) retrieveResponse(model, pendingId)
+                        else sendResponsesRequest(model.url, model.key.first(), body, stream, onReceive) { id ->
+                            session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = id)))
+                            logger.info("Responses API response created: $requestDescription response=${safeLogValue(id)}")
+                        }
                     }
-                    if (received.error is CancellationException) throw received.error!!
+                    if (received.error is CancellationException)
+                    {
+                        logger.info("Responses API request cancelled: $requestDescription")
+                        throw received.error!!
+                    }
                     if (received.error == null)
                     {
+                        logger.info("Responses API request completed: $requestDescription response=${safeLogValue(received.responseId.orEmpty())}")
                         result = received
                         break
                     }
+                    logger.warning("Responses API request failed: $requestDescription reason=${safeRequestFailure(received.error!!)}")
                     errors += received.error!!
                     if (received.responseStatus in setOf("failed", "incomplete", "cancelled") &&
                         session.state.turn!!.toolResults.isEmpty() && session.state.turn!!.imageNotices.isEmpty())
@@ -130,6 +143,8 @@ suspend fun sendAiRequest(
                     // Invalid requests and missing server state cannot be repaired by repeating.
                     if (received.error!!.httpStatus() in 400..499 && received.error!!.httpStatus() != 429)
                         throw received.error!!
+                    if (attempt + 1 < aiConfig.retry)
+                        logger.info("Responses API retry scheduled: turn=${safeLogValue(turnId)} nextAttempt=${attempt + 2}/${aiConfig.retry}")
                 }
                 val completed = result ?: throw AiRetryFailedException(errors.map(::UnknownAiResponseException))
                 val responseId = completed.responseId?.takeIf { it.isNotBlank() }
@@ -211,10 +226,66 @@ private fun Throwable.httpStatus(): Int? = when (this)
     else -> cause?.takeUnless { it === this }?.httpStatus()
 }
 
+internal class ResponsesStreamIdleTimeoutException(val timeoutMillis: Long): IOException(
+    "Responses API stream received no event for $timeoutMillis ms (including response headers)")
+
+private class ResponsesRequestTimeoutException(val timeoutMillis: Long): IOException(
+    "Responses API request exceeded its $timeoutMillis ms timeout")
+
+/** The deadline starts before connecting and resets for every SSE event, including non-text events. */
+internal suspend fun <T> withResponsesStreamIdleTimeout(
+    timeoutMillis: Long,
+    block: suspend (activity: () -> Unit) -> T,
+): T = coroutineScope {
+    require(timeoutMillis > 0) { "Responses API idle timeout must be positive" }
+    val activity = Channel<Unit>(Channel.CONFLATED)
+    val watchdog = launch(start = CoroutineStart.UNDISPATCHED) {
+        while (withTimeoutOrNull(timeoutMillis) { activity.receive(); true } == true) { }
+        // A normal exception cancels the in-flight HTTP call but is not mistaken for user cancellation.
+        throw ResponsesStreamIdleTimeoutException(timeoutMillis)
+    }
+    try { block { activity.trySend(Unit) } }
+    finally
+    {
+        watchdog.cancel()
+        activity.close()
+    }
+}
+
+private suspend fun <T> withResponsesRequestTimeout(timeoutMillis: Long, block: suspend () -> T): T
+{
+    val result = withTimeoutOrNull(timeoutMillis) { Result.success(block()) }
+        ?: throw ResponsesRequestTimeoutException(timeoutMillis)
+    return result.getOrThrow()
+}
+
+private suspend fun <T> withResponsesWaitingLog(description: String, block: suspend () -> T): T = coroutineScope {
+    val started = System.nanoTime()
+    val reporter = launch {
+        while (isActive)
+        {
+            delay(30_000)
+            val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+            logger.info("Responses API waiting: $description elapsed=${elapsedSeconds}s")
+        }
+    }
+    try { block() }
+    finally { reporter.cancel() }
+}
+
+private fun safeLogValue(value: String): String = value.replace(Regex("[^A-Za-z0-9_.:/-]"), "_").take(120)
+
+private fun safeRequestFailure(error: Throwable): String = when (error)
+{
+    is ResponsesStreamIdleTimeoutException -> "no SSE event for ${error.timeoutMillis} ms"
+    is ResponsesRequestTimeoutException -> "request timeout after ${error.timeoutMillis} ms"
+    else -> error.httpStatus()?.let { "HTTP $it" } ?: error.javaClass.simpleName
+}
+
 private suspend fun retrieveResponse(model: AiConfig.LlmModel, id: String): RequestResult = try
 {
     require(id.matches(Regex("[A-Za-z0-9_-]+"))) { "Invalid saved response ID" }
-    val response = withTimeout(aiConfig.timeout) {
+    val response = withResponsesRequestTimeout(aiConfig.timeout) {
         defaultAiClient.get("${model.url.trimEnd('/')}/$id") { bearerAuth(model.key.first()) }
             .let { it.status to it.bodyAsText() }
     }
@@ -224,12 +295,13 @@ private suspend fun retrieveResponse(model: AiConfig.LlmModel, id: String): Requ
 catch (error: Throwable) { RequestResult(emptyMap(), ChatMessage(Role.ASSISTANT, ""), TokenUsage(), error) }
 
 @OptIn(ExperimentalCoroutinesApi::class)
-private suspend fun sendResponsesRequest(
+internal suspend fun sendResponsesRequest(
     url: String,
     key: String,
     body: JsonObject,
     stream: Boolean,
     onReceive: suspend (StreamAiResponseSlice) -> Unit,
+    timeoutMillis: Long = aiConfig.timeout,
     onResponseCreated: (String) -> Unit,
 ): RequestResult
 {
@@ -239,7 +311,7 @@ private suspend fun sendResponsesRequest(
     {
         if (!stream)
         {
-            val response = withTimeout(aiConfig.timeout) {
+            val response = withResponsesRequestTimeout(timeoutMillis) {
                 defaultAiClient.post(url) {
                     bearerAuth(key)
                     contentType(ContentType.Application.Json)
@@ -252,29 +324,40 @@ private suspend fun sendResponsesRequest(
         }
         else
         {
-            streamAiClient.sse(url, {
-                method = HttpMethod.Post
-                bearerAuth(key)
-                contentType(ContentType.Application.Json)
-                accept(ContentType.Text.EventStream)
-                setBody(contentNegotiationJson.encodeToString(body))
-            }) {
-                if (!call.response.status.isSuccess())
-                    throw AiHttpException(call.response.status.value, call.response.bodyAsText())
-                incoming.transformWhile { event ->
-                    val data = event.data
-                    if (!data.isNullOrBlank() && data.trim() != "[DONE]")
-                    {
-                        val parsed = contentNegotiationJson.parseToJsonElement(data).jsonObject
-                        if (parsed["type"] == JsonPrimitive("response.created"))
-                            (parsed["response"] as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull
-                                ?.takeIf { it.isNotBlank() }?.let(onResponseCreated)
-                        state.accept(parsed, onReceive)
+            var requestJob: Job? = null
+            try
+            {
+                withResponsesStreamIdleTimeout(timeoutMillis) { activity ->
+                    streamAiClient.sse(url, {
+                        // Ktor starts the SSE handshake in HttpClient's scope. Cancelling only
+                        // its caller can leave that detached request waiting for headers.
+                        requestJob = executionContext
+                        method = HttpMethod.Post
+                        bearerAuth(key)
+                        contentType(ContentType.Application.Json)
+                        accept(ContentType.Text.EventStream)
+                        setBody(contentNegotiationJson.encodeToString(body))
+                    }) {
+                        if (!call.response.status.isSuccess())
+                            throw AiHttpException(call.response.status.value, call.response.bodyAsText())
+                        incoming.transformWhile { event ->
+                            activity()
+                            val data = event.data
+                            if (!data.isNullOrBlank() && data.trim() != "[DONE]")
+                            {
+                                val parsed = contentNegotiationJson.parseToJsonElement(data).jsonObject
+                                if (parsed["type"] == JsonPrimitive("response.created"))
+                                    (parsed["response"] as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull
+                                        ?.takeIf { it.isNotBlank() }?.let(onResponseCreated)
+                                state.accept(parsed, onReceive)
+                            }
+                            emit(Unit)
+                            !state.isTerminal
+                        }.collect { }
                     }
-                    emit(Unit)
-                    !state.isTerminal
-                }.collect { }
+                }
             }
+            finally { requestJob?.cancel() }
             state.result()
         }
     }

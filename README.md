@@ -76,7 +76,9 @@ The default `proxy: null` uses direct connections. This setting covers the forum
 
 Edit `configs/ai.yml`:
 ```yaml
-# Timeout for non-streaming API requests, in milliseconds
+# Timeout in milliseconds: total time for non-streaming requests/recovery GETs;
+# maximum time without a new event for streams, including waiting for response headers.
+# Active streams may run longer as long as events keep arriving.
 timeout: 120000
 retry: 3
 model:

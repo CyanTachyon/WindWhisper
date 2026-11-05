@@ -8,7 +8,7 @@ import java.net.URI
 
 @Serializable
 data class AiConfig(
-    @YamlComment("AI请求的超时时间，单位为毫秒，仅限非流式请求")
+    @YamlComment("超时时间（毫秒）：非流式请求/恢复GET为总时限；流式请求为无新事件的最长等待时间，包含等待响应头")
     val timeout: Long = 2 * 60 * 1_000,
     @YamlComment("AI服务的重试次数")
     val retry: Int = 3,

@@ -1,8 +1,6 @@
 package moe.tachyon.windwhisper
 
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.ai.Role
@@ -37,7 +35,7 @@ suspend fun workMain(user: LoginData, prompt: String)
     while (true)
     {
         delay(5.seconds)
-        withContext(NonCancellable) { work(user, instructions, session, images, scope) }
+        work(user, instructions, session, images, scope)
     }
 }
 

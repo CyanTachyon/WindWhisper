@@ -1,12 +1,14 @@
 package moe.tachyon.windwhisper
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
 import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.forum.UnreadNotification
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -32,6 +34,19 @@ class NotificationWorkTest
         assertFalse(processNotifications(listOf(UnreadNotification(2, 2), UnreadNotification(1, 1)),
             null, { false }, { turn, _ -> events += "process:$turn"; false },
             { id -> events += "ack:$id"; true }))
+        assertEquals(listOf("process:notification:1"), events)
+    }
+
+    @Test
+    fun `cancelling a turn leaves it unread and prevents later notifications`() = runBlocking {
+        val events = mutableListOf<String>()
+        assertFailsWith<CancellationException> {
+            processNotifications(listOf(UnreadNotification(2, 2), UnreadNotification(1, 1)),
+                null, { false }, { turn, _ ->
+                    events += "process:$turn"
+                    throw CancellationException("Application is stopping")
+                }, { id -> events += "ack:$id"; true })
+        }
         assertEquals(listOf("process:notification:1"), events)
     }
 
