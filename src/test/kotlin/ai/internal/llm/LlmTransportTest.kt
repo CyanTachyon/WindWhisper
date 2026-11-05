@@ -410,16 +410,17 @@ class LlmTransportTest
     }
 
     @Test
-    fun `partial tool success and ordinary or uncertain failure continue later with all outputs without replay`() = runBlocking {
+    fun `ordinary and uncertain tool failures reach the model in the same turn and other calls still run`() = runBlocking {
         for (uncertain in listOf(false, true)) withSessionFile { file ->
             val executions = mutableListOf<String>()
+            val errorMessage = if (uncertain) "Write may have succeeded" else "Fixture tool execution failed"
             val tools = listOf(
                 echoTool(executions),
                 AiToolInfo<TextArgs>("write_post", "Test remote write", "Write") { _, _ ->
                     executions += "failed write"
                     if (uncertain)
-                        throw UncertainToolExecutionException("Write may have succeeded", java.io.IOException("Connection lost after write"))
-                    else throw java.io.IOException("Fixture tool execution failed")
+                        throw UncertainToolExecutionException(errorMessage, java.io.IOException("Connection lost after write"))
+                    else throw java.io.IOException(errorMessage)
                 },
             )
             MockServer { index, request ->
@@ -427,47 +428,229 @@ class LlmTransportTest
                 when (index)
                 {
                     0 -> MockResponse(completed("resp_write", listOf(call("call_saved", "echo", "saved"),
-                        call("call_write", "write_post", "post once"), call("call_unexecuted", "echo", "must not run"))))
+                        call("call_write", "write_post", "post once"), call("call_after", "echo", "after failure"))))
                     1 -> {
-                        assertEquals(listOf(
-                            toolOutput("call_saved", "echo:saved"),
-                            toolOutput("call_write", "本批处理已终止，此操作的执行结果未确认。"),
-                            toolOutput("call_unexecuted", "本批处理已失败，此调用未执行。"),
-                            userInput("Next batch"),
-                        ), request.input())
-                        MockResponse(completed("resp_next", listOf(message("Next batch done"))))
+                        val outputs = request.input()
+                        assertEquals(3, outputs.size)
+                        assertEquals(toolOutput("call_saved", "echo:saved"), outputs[0])
+                        val detail = toolError(outputs[1], "call_write")
+                        assertEquals(errorMessage, detail.getValue("message").jsonPrimitive.content)
+                        assertEquals(if (uncertain) "UncertainToolExecutionException" else "IOException",
+                            detail.getValue("type").jsonPrimitive.content)
+                        if (uncertain) assertEquals(JsonPrimitive("unknown"), detail["outcome"])
+                        else assertNull(detail["outcome"])
+                        assertEquals(toolOutput("call_after", "echo:after failure"), outputs[2])
+                        MockResponse(completed("resp_done", listOf(message("Handled the failure"))))
                     }
-                    else -> error("No failed batch or executed tool may be replayed")
+                    else -> error("A tool error must not trigger an automatic replay")
                 }
             }.use { server ->
                 val session = ResponsesSession(file, "account-a")
                 session.update(session.state.copy(previousResponseId = "resp_before"))
-                val failed = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Write a post"),
-                    instructions = INSTRUCTIONS, tools = tools, session = session, turnId = "batch-failed",
+                val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Write a post"),
+                    instructions = INSTRUCTIONS, tools = tools, session = session, turnId = "batch-tools",
                     deliveryIds = listOf("n1", "n2"), stream = false) }
-                assertIs<AiResult.UnknownError>(failed)
-                if (uncertain) assertIs<UncertainToolExecutionException>(failed.error)
-                else assertIs<java.io.IOException>(failed.error)
-                assertEquals(listOf("saved", "failed write"), executions)
+                server.verify()
+                assertIs<AiResult.Success>(result)
+                assertEquals(listOf("saved", "failed write", "after failure"), executions)
                 val restarted = ResponsesSession(file, "account-a")
                 assertNull(restarted.pendingTurnId)
-                assertEquals("resp_write", restarted.state.previousResponseId)
+                assertEquals("resp_done", restarted.state.previousResponseId)
                 assertTrue(restarted.isCompleted("n1") && restarted.isCompleted("n2"))
                 assertEquals(listOf("n1", "n2"), restarted.completedUnacknowledgedTurnIds)
                 val duplicate = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Never repeat"),
-                    instructions = INSTRUCTIONS, tools = tools, session = restarted, turnId = "batch-failed",
+                    instructions = INSTRUCTIONS, tools = tools, session = restarted, turnId = "batch-tools",
                     deliveryIds = listOf("n1", "n2"), stream = false) }
                 assertIs<AiResult.Success>(duplicate)
-                assertEquals(1, server.requests.size)
-                val next = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Next batch"),
-                    instructions = INSTRUCTIONS, tools = tools, session = restarted, turnId = "batch-new",
-                    deliveryIds = listOf("n3"), stream = false) }
-                server.verify()
-                assertIs<AiResult.Success>(next)
-                assertEquals(listOf("saved", "failed write"), executions)
+                assertTrue(duplicate.messages.isEmpty())
                 assertEquals(2, server.requests.size)
+                assertEquals(listOf("saved", "failed write", "after failure"), executions)
                 assertTrue(restarted.state.deferredInput.isEmpty())
             }
+        }
+    }
+
+    @Test
+    fun `rate limit details reach the model and only its new call retries the write`() = runBlocking {
+        val forumError = """{"errors":["您回复的频率太快了。请等待几秒后再试。"],"error_type":"rate_limit","extras":{"wait_seconds":1}}"""
+        val executions = mutableListOf<String>()
+        val tool = AiToolInfo<TextArgs>("send_post", "Test forum post", "Post") { args, _ ->
+            executions += args.text
+            if (executions.size == 1) throw IllegalStateException("Failed to send post: 429\n$forumError")
+            AiToolInfo.ToolResult(Content("posted"))
+        }
+        val session = ResponsesSession()
+        MockServer { index, request ->
+            assertCommonRequest(request, listOf(null, "resp_rate_limited", "resp_model_retry")[index])
+            val response = when (index)
+            {
+                0 -> completed("resp_rate_limited", listOf(call("call_original", "send_post", "hello")))
+                1 -> {
+                    assertEquals(listOf("hello"), executions, "The client must not retry before the model sees the failure")
+                    val detail = toolError(request.input().single(), "call_original")
+                    assertEquals("Failed to send post: 429\n$forumError", detail.getValue("message").jsonPrimitive.content)
+                    assertEquals("IllegalStateException", detail.getValue("type").jsonPrimitive.content)
+                    assertNull(detail["outcome"])
+                    completed("resp_model_retry", listOf(call("call_new_attempt", "send_post", "hello")))
+                }
+                2 -> {
+                    assertEquals(listOf(toolOutput("call_new_attempt", "posted")), request.input())
+                    completed("resp_done", listOf(message("Posted after rate limit")))
+                }
+                else -> error("Unexpected extra request")
+            }
+            MockResponse.sse(created(response.getValue("id").jsonPrimitive.content), terminal(response))
+        }.use { server ->
+            val slices = mutableListOf<StreamAiResponseSlice>()
+            val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Post hello"),
+                instructions = INSTRUCTIONS, tools = listOf(tool), session = session, turnId = "rate-limit",
+                onReceive = slices::add) }
+            server.verify()
+            assertIs<AiResult.Success>(result)
+            assertEquals(listOf("hello", "hello"), executions)
+            assertEquals(listOf("call_original", "call_new_attempt"), slices.filterIsInstance<StreamAiResponseSlice.ToolCall>().map { it.id })
+            assertEquals(3, server.requests.size)
+            assertEquals("resp_done", session.state.previousResponseId)
+            assertTrue(session.isCompleted("rate-limit"))
+        }
+    }
+
+    @Test
+    fun `unknown tools and malformed arguments return separate errors without blocking valid calls`() = runBlocking {
+        val executions = mutableListOf<String>()
+        MockServer { index, request ->
+            assertCommonRequest(request, if (index == 0) null else "resp_invalid_calls")
+            when (index)
+            {
+                0 -> MockResponse(completed("resp_invalid_calls", listOf(
+                    call("call_unknown", "not_registered", "unused"),
+                    JsonObject(call("call_bad_json", "echo", "unused") + ("arguments" to JsonPrimitive("{"))),
+                    call("call_valid", "echo", "valid"),
+                )))
+                1 -> {
+                    val outputs = request.input()
+                    assertEquals(3, outputs.size)
+                    assertTrue(toolError(outputs[0], "call_unknown").getValue("message").jsonPrimitive.content.contains("not_registered"))
+                    assertTrue(toolError(outputs[1], "call_bad_json").getValue("message").jsonPrimitive.content.isNotBlank())
+                    assertEquals(toolOutput("call_valid", "echo:valid"), outputs[2])
+                    MockResponse(completed("resp_done", listOf(message("Corrected invalid calls"))))
+                }
+                else -> error("Unexpected request")
+            }
+        }.use { server ->
+            val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Use tools"),
+                instructions = INSTRUCTIONS, tools = listOf(echoTool(executions)), stream = false) }
+            server.verify()
+            assertIs<AiResult.Success>(result)
+            assertEquals(listOf("valid"), executions)
+            assertEquals(2, server.requests.size)
+        }
+    }
+
+    @Test
+    fun `cancellation while model considers a tool error resumes without executing that tool again`() = runBlocking {
+        withSessionFile { file ->
+            var executions = 0
+            val tool = AiToolInfo<TextArgs>("failing_tool", "Test failure", "Failure") { _, _ ->
+                executions++
+                throw java.io.IOException("Temporary failure")
+            }
+            MockServer { index, request ->
+                when (index)
+                {
+                    0 -> {
+                        assertCommonRequest(request, null)
+                        MockResponse.sse(created("resp_failed_tool"), terminal(completed("resp_failed_tool",
+                            listOf(call("call_failure", "failing_tool", "once")))))
+                    }
+                    1 -> {
+                        assertCommonRequest(request, "resp_failed_tool")
+                        assertEquals("Temporary failure", toolError(request.input().single(), "call_failure")
+                            .getValue("message").jsonPrimitive.content)
+                        MockResponse.sse(created("resp_considering_error"), delta("response.reasoning_summary_text.delta", "Pause here"))
+                    }
+                    2 -> {
+                        assertEquals("GET", request.method)
+                        assertEquals("/v1/responses/resp_considering_error", request.path)
+                        MockResponse(completed("resp_considering_error", listOf(message("Skip this failed operation"))))
+                    }
+                    else -> error("Cancellation must not replay the failed tool or its model input")
+                }
+            }.use { server ->
+                val interrupted = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Use tool"),
+                    instructions = INSTRUCTIONS, tools = listOf(tool), session = ResponsesSession(file, "account-a"), turnId = "n1",
+                    onReceive = { if (it is StreamAiResponseSlice.Message && it.reasoningContent == "Pause here")
+                        throw CancellationException("Pause the test") }) }
+                assertIs<AiResult.Cancelled>(interrupted)
+                assertEquals(1, executions)
+                val restarted = ResponsesSession(file, "account-a")
+                assertFalse(restarted.isCompleted("n1"))
+                assertEquals("resp_considering_error", restarted.state.turn?.responseId)
+                assertEquals("Temporary failure", toolError(restarted.state.turn!!.input.single(), "call_failure")
+                    .getValue("message").jsonPrimitive.content)
+                val resumed = bounded { sendAiRequest(server.model(), ChatMessages.empty(), instructions = INSTRUCTIONS,
+                    tools = listOf(tool), session = restarted, turnId = "n1") }
+                server.verify()
+                assertIs<AiResult.Success>(resumed)
+                assertEquals(1, executions)
+                assertEquals(listOf("POST", "POST", "GET"), server.requests.map { it.method })
+                assertTrue(restarted.isCompleted("n1"))
+            }
+        }
+    }
+
+    @Test
+    fun `tool cancellation stays cancelled and is not sent as a model error`() = runBlocking {
+        var executions = 0
+        val tool = AiToolInfo<TextArgs>("cancelled_tool", "Cancelled operation", "Cancel") { _, _ ->
+            executions++
+            throw CancellationException("Stop requested")
+        }
+        val session = ResponsesSession()
+        MockServer { index, _ ->
+            assertEquals(0, index, "Cancellation must not produce a function_call_output request")
+            MockResponse(completed("resp_cancel", listOf(call("call_cancel", "cancelled_tool", "once"))))
+        }.use { server ->
+            val result = bounded { sendAiRequest(server.model(), ChatMessages(Role.USER, "Use tool"),
+                tools = listOf(tool), session = session, turnId = "cancelled-turn", stream = false) }
+            server.verify()
+            assertIs<AiResult.Cancelled>(result)
+            assertEquals(1, executions)
+            assertEquals(1, server.requests.size)
+            assertFalse(session.isCompleted("cancelled-turn"))
+            assertEquals("call_cancel", session.state.turn?.executingToolId)
+            assertTrue(session.state.turn!!.toolResults.isEmpty())
+        }
+    }
+
+    @Test
+    fun `tool event callback cancellation escapes before invocation or from progress without running later calls`() = runBlocking {
+        for (cancelOnProgress in listOf(false, true))
+        {
+            val executions = mutableListOf<String>()
+            val events = mutableListOf<StreamAiResponseSlice>()
+            val cancellation = CancellationException("Cancel from tool event")
+            val progressTool = AiToolInfo<TextArgs>("progress_tool", "Tool with progress", "Progress") { _, sendMessage ->
+                executions += "started"
+                sendMessage(Content("Progress before completion"))
+                executions += "finished"
+                AiToolInfo.ToolResult(Content("done"))
+            }
+            val thrown = assertFailsWith<CancellationException> {
+                parseToolCalls(
+                    linkedMapOf("call_first" to ("progress_tool" to "{\"text\":\"first\"}"),
+                        "call_later" to ("echo" to "{\"text\":\"later\"}")),
+                    listOf(progressTool, echoTool(executions)),
+                ) { event ->
+                    events += event
+                    if ((!cancelOnProgress && event is StreamAiResponseSlice.ToolCall) ||
+                        (cancelOnProgress && event is StreamAiResponseSlice.ToolMessage)) throw cancellation
+                }
+            }
+            assertSame(cancellation, thrown)
+            assertEquals(if (cancelOnProgress) listOf("started") else emptyList(), executions)
+            assertEquals(listOf("call_first"), events.filterIsInstance<StreamAiResponseSlice.ToolCall>().map { it.id })
+            assertEquals(if (cancelOnProgress) 1 else 0, events.filterIsInstance<StreamAiResponseSlice.ToolMessage>().size)
         }
     }
 
@@ -576,25 +759,32 @@ class LlmTransportTest
     }
 
     @Test
-    fun `real read_image download and decode failures discard the batch without model continuation or delivery retry`() = runBlocking {
+    fun `real read_image failures reach the model without replaying the download`() = runBlocking {
         for (download in listOf(false, true)) withSessionFile { file ->
             var imageUrl = "data:image/png;base64,%%%invalid%%%"
             MockServer { index, request ->
-                when (index)
+                when
                 {
-                    0 -> {
+                    index == 0 -> {
                         assertCommonRequest(request, null)
                         val readImage = JsonObject(call("call_image", "read_image", "") +
                             ("arguments" to JsonPrimitive(buildJsonObject { putJsonArray("urls") { add(imageUrl) } }.toString())))
                         MockResponse(completed("resp_read_image", listOf(readImage)))
                     }
-                    1 -> {
-                        assertTrue(download, "Invalid base64 must fail locally")
+                    download && index == 1 -> {
                         assertEquals("GET", request.method)
                         assertEquals("/missing-image.png", request.path)
                         MockResponse("missing image", status = 404, contentType = "text/plain")
                     }
-                    else -> error("read_image failure must not continue the model or retry its download")
+                    index == (if (download) 2 else 1) -> {
+                        assertCommonRequest(request, "resp_read_image")
+                        val detail = toolError(request.input().single(), "call_image")
+                        assertEquals("IllegalArgumentException", detail.getValue("type").jsonPrimitive.content)
+                        if (download) assertTrue(detail.getValue("message").jsonPrimitive.content.contains("404"))
+                        else assertTrue(detail.getValue("message").jsonPrimitive.content.isNotBlank())
+                        MockResponse(completed("resp_done", listOf(message("Image could not be read"))))
+                    }
+                    else -> error("The client must not replay the image download after reporting its failure")
                 }
             }.use { server ->
                 val model = server.model().copy(visible = true)
@@ -602,20 +792,19 @@ class LlmTransportTest
                 val tools = AiToolSet(ReadImage()).getTools(null, model)
                 assertEquals(listOf("read_image"), tools.map { it.name })
                 val session = ResponsesSession(file, "account-a")
-                val failed = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Read this image"), instructions = INSTRUCTIONS,
+                val result = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Read this image"), instructions = INSTRUCTIONS,
                     tools = tools, session = session, turnId = "image-batch", deliveryIds = listOf("n1", "n2"), stream = false) }
-                assertIs<AiResult.UnknownError>(failed)
-                assertIs<IllegalArgumentException>(failed.error)
-                if (download) assertTrue(failed.error.message.orEmpty().contains("404"))
+                assertIs<AiResult.Success>(result)
                 val restored = ResponsesSession(file, "account-a")
                 assertNull(restored.pendingTurnId)
+                assertEquals("resp_done", restored.state.previousResponseId)
                 assertTrue(restored.isCompleted("n1") && restored.isCompleted("n2"))
-                val duplicate = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Do not retry failed image"),
+                val duplicate = bounded { sendAiRequest(model, ChatMessages(Role.USER, "Duplicate image notification"),
                     tools = tools, session = restored, turnId = "image-batch", deliveryIds = listOf("n1", "n2"), stream = false) }
                 server.verify()
                 assertIs<AiResult.Success>(duplicate)
                 assertTrue(duplicate.messages.isEmpty())
-                assertEquals(if (download) listOf("POST", "GET") else listOf("POST"), server.requests.map { it.method })
+                assertEquals(if (download) listOf("POST", "GET", "POST") else listOf("POST", "POST"), server.requests.map { it.method })
             }
         }
     }
@@ -663,6 +852,14 @@ class LlmTransportTest
     private fun json(value: String): JsonObject = Json.parseToJsonElement(value).jsonObject
     private fun userInput(text: String) = buildJsonObject { put("role", "user"); put("content", text) }
     private fun toolOutput(id: String, text: String) = buildJsonObject { put("type", "function_call_output"); put("call_id", id); put("output", text) }
+    private fun toolError(output: JsonObject, id: String): JsonObject
+    {
+        assertEquals(JsonPrimitive("function_call_output"), output["type"])
+        assertEquals(JsonPrimitive(id), output["call_id"])
+        val result = json(output.getValue("output").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), result["ok"])
+        return result.getValue("error").jsonObject
+    }
     private fun reasoning(text: String = "") = buildJsonObject {
         put("type", "reasoning"); put("id", "rs_test")
         putJsonArray("summary") { if (text.isNotEmpty()) add(buildJsonObject { put("type", "summary_text"); put("text", text) }) }

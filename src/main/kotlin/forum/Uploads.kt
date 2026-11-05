@@ -4,6 +4,7 @@ import io.ktor.client.call.body
 import io.ktor.client.request.forms.MultiPartFormDataContent
 import io.ktor.client.request.forms.formData
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
@@ -26,7 +27,7 @@ suspend fun LoginData.uploadGeneratedImage(image: GeneratedImageStore.Image): St
             })
         }))
     }
-    require(response.status.isSuccess()) { "上传生成图片失败，HTTP 状态码 ${response.status.value}" }
+    require(response.status.isSuccess()) { "上传生成图片失败，HTTP 状态码 ${response.status.value}\n${response.bodyAsText()}" }
     val shortUrl = response.body<JsonObject>()["short_url"]?.jsonPrimitive?.content
     require(shortUrl != null && shortUrl.matches(Regex("upload://[A-Za-z0-9_-]+\\.(?:png|jpe?g|webp)", RegexOption.IGNORE_CASE))) {
         "论坛未返回有效的图片 short_url"

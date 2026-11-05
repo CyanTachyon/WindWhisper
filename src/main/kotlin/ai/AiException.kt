@@ -2,7 +2,7 @@ package moe.tachyon.windwhisper.ai
 
 import moe.tachyon.windwhisper.showJson
 
-/** The remote service may have accepted a write; asking the model to retry could duplicate it. */
+/** The remote service may have accepted a write; expose that uncertainty in its tool result. */
 class UncertainToolExecutionException(message: String, cause: Throwable): java.io.IOException(message, cause)
 
 sealed class AiResponseException(msg: String, cause: Throwable? = null): Exception(msg, cause)

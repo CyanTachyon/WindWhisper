@@ -10,7 +10,9 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
 import moe.tachyon.windwhisper.MainConfig
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
+import moe.tachyon.windwhisper.ai.Role
 import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
+import moe.tachyon.windwhisper.ai.internal.llm.parseToolCalls
 import moe.tachyon.windwhisper.ai.tools.AiToolInfo
 import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.ai.tools.Forum
@@ -189,7 +191,7 @@ class GeneratedImageUploadTest
     }
 
     @Test
-    fun `forum read post and upload HTTP failures propagate without returning tool text or retrying writes`() = runBlocking {
+    fun `forum implementations throw HTTP failures to the tool boundary without retrying writes`() = runBlocking {
         val store = GeneratedImageStore(directory())
         store.save("ig_example", base64(imageBytes()), "png")
         val cases = listOf(
@@ -207,6 +209,38 @@ class GeneratedImageUploadTest
                 assertFalse(error is CancellationException, "$toolName must fail before the test timeout")
                 assertTrue("500" in error.message.orEmpty())
                 assertEquals(1, server.requests.count { it.path == path }, "$toolName must not retry the failed request")
+                server.verify()
+            }
+        }
+    }
+
+    @Test
+    fun `forum rate limit responses reach the model as tool errors with the complete response body`() = runBlocking {
+        val store = GeneratedImageStore(directory())
+        store.save("ig_example", base64(imageBytes()), "png")
+        val body = """{"errors":["您回复的频率太快了。请等待几秒后再试。"],"error_type":"rate_limit","extras":{"wait_seconds":1}}"""
+        val cases = listOf(
+            Triple("get_posts", "/t/7/1.json", Json.parseToJsonElement("""{"posts":[{"topicId":7,"postNumber":1}]}""").jsonObject),
+            Triple("send_post", "/posts.json", Json.parseToJsonElement("""{"topicId":7,"content":"One post","replyTo":0}""").jsonObject),
+            Triple("upload_generated_image", "/uploads.json", uploadArgs("ig_example", 7)),
+        )
+        cases.forEach { (toolName, path, arguments) ->
+            MockForum { request -> if (request.path == path) Reply(body, 429) else Reply(topic()) }.use { server ->
+                configure(server)
+                val callId = "call_$toolName"
+                val result = withTimeout(5_000) {
+                    parseToolCalls(mapOf(callId to (toolName to arguments.toString())), forumTools(store)) {}
+                }.single()
+                assertEquals(Role.TOOL(callId, toolName), result.role)
+                val output = Json.parseToJsonElement(result.content.toText()).jsonObject
+                assertEquals(false, output["ok"]!!.jsonPrimitive.boolean)
+                val error = output["error"]!!.jsonObject
+                val message = error["message"]!!.jsonPrimitive.content
+                assertTrue("429" in message, "$toolName must retain the HTTP status")
+                assertTrue(body in message, "$toolName must retain the entire forum error response")
+                assertFalse("outcome" in error, "A received rate limit response is not an uncertain write")
+                assertEquals(1, server.requests.count { it.path == path }, "$toolName must not retry the failed request")
+                assertTrue(server.requests.groupingBy { it.method to it.path }.eachCount().values.all { it == 1 })
                 server.verify()
             }
         }

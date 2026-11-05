@@ -121,7 +121,7 @@ suspend fun LoginData.getPosts(topic: Int, posts: List<Int>): List<PostData> = l
     val url = "${mainConfig.url}/t/$topic/posts.json?${posts.joinToString("&") { "post_ids%5B%5D=$it" }}&include_suggested=false"
     val res = get(url)
     if (res.status.value == 404) return emptyList()
-    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}" }
+    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}\n${res.bodyAsText()}" }
     val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: error("Forum response is missing post_stream")
     val tmp = body["posts"]?.jsonArray?.associate { it.jsonObject["id"]!!.jsonPrimitive.int to it.jsonObject }
         ?: error("Forum post_stream is missing posts")
@@ -147,7 +147,7 @@ suspend fun LoginData.getPosts(topic: Int, postNumber: Int): List<PostData> = lo
     val url = "${mainConfig.url}/t/$topic/${postNumber}.json?include_suggested=false"
     val res = get(url)
     if (res.status.value == 404) return emptyList()
-    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}" }
+    check(res.status.isSuccess()) { "Failed to get posts in topic $topic: HTTP ${res.status.value}\n${res.bodyAsText()}" }
     val body = res.body<JsonObject>()["post_stream"]?.jsonObject ?: error("Forum response is missing post_stream")
     val tmp = body["posts"]?.jsonArray?.associate { it.jsonObject["id"]!!.jsonPrimitive.int to it.jsonObject }
         ?: error("Forum post_stream is missing posts")

@@ -386,30 +386,29 @@ suspend fun parseToolCalls(
     require(waitingTools.keys.all { it.isNotBlank() }) { "工具调用必须包含有效 id" }
     return waitingTools.flatMap()
     { (id, t) ->
+        currentCoroutineContext().ensureActive()
         val (toolName, parm) = t
-        val tool = tools.firstOrNull { it.name == toolName }
-            ?: error("Requested tool does not exist: $toolName")
-
-        logger.warning("fail to put toolcall message")
-        {
-            onReceive(StreamAiResponseSlice.ToolCall(id, tool, parm))
-        }
-
-        val data: Any = tool.parse(parm)
-
         var toolReasoning = Content()
-        val content = run()
+        val content = try
         {
+            val tool = tools.firstOrNull { it.name == toolName }
+                ?: error("Requested tool does not exist: $toolName")
+            emitToolEvent(StreamAiResponseSlice.ToolCall(id, tool, parm), onReceive)
+            val data: Any = tool.parse(parm)
             logger.config("Calling tool $toolName with parameters $parm")
             @Suppress("UNCHECKED_CAST")
             (tool as AiToolInfo<Any>).invoke(data)
             {
                 toolReasoning += it
-                logger.warning("fail to put tool message")
-                {
-                    onReceive(StreamAiResponseSlice.ToolMessage(id, it))
-                }
+                emitToolEvent(StreamAiResponseSlice.ToolMessage(id, it), onReceive)
             }
+        }
+        catch (error: CancellationException) { throw error }
+        catch (error: Exception)
+        {
+            currentCoroutineContext().ensureActive()
+            logger.warning("Tool $toolName failed; returning its error to the model: ${error.message ?: error.javaClass.simpleName}")
+            AiToolInfo.ToolResult(Content(toolErrorOutput(error).toString()))
         }
         val toolCall = ChatMessage(
             role = Role.TOOL(id, toolName),
@@ -426,4 +425,31 @@ suspend fun parseToolCalls(
         }
         return@flatMap listOf(toolCall) + showingContents
     }.toChatMessages()
+}
+
+private suspend fun emitToolEvent(
+    event: StreamAiResponseSlice,
+    onReceive: suspend (StreamAiResponseSlice) -> Unit,
+)
+{
+    try { onReceive(event) }
+    catch (error: CancellationException) { throw error }
+    catch (error: Exception) { logger.warning("Failed to display tool event", error) }
+}
+
+private fun toolErrorOutput(error: Exception): JsonObject = buildJsonObject {
+    put("ok", false)
+    putJsonObject("error") {
+        put("type", error.javaClass.simpleName.ifBlank { error.javaClass.name })
+        put("message", error.message ?: error.toString())
+        if (error is UncertainToolExecutionException) put("outcome", "unknown")
+        if (error.cause != null) putJsonArray("causes") {
+            generateSequence(error.cause) { it.cause }.take(8).forEach { cause ->
+                add(buildJsonObject {
+                    put("type", cause.javaClass.simpleName.ifBlank { cause.javaClass.name })
+                    put("message", cause.message ?: cause.toString())
+                })
+            }
+        }
+    }
 }
