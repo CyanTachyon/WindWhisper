@@ -1,7 +1,6 @@
 package moe.tachyon.windwhisper
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.GeneratedImageStore
 import moe.tachyon.windwhisper.ai.Role
@@ -24,7 +23,7 @@ import moe.tachyon.windwhisper.forum.getUnreadNotifications
 import moe.tachyon.windwhisper.forum.markAsRead
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
 import java.io.File
-import kotlin.time.Duration.Companion.seconds
+import java.util.concurrent.TimeUnit
 
 suspend fun workMain(user: LoginData, prompt: String)
 {
@@ -32,15 +31,46 @@ suspend fun workMain(user: LoginData, prompt: String)
     val session = ResponsesSession(File(dataDir, "responses-session.json"), scope)
     val images = GeneratedImageStore(File(dataDir, "generated-images"))
     val instructions = prompt.replace($$"${self_name}", mainConfig.username)
+    val runtime = ConversationRuntime(user, instructions, session, images, scope)
+    ConversationRuntime.attach(runtime)
     logger.info("Starting Responses notification loop...")
-    while (true)
+    var nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    try
     {
-        delay(5.seconds)
-        work(user, instructions, session, images, scope)
+        while (true)
+        {
+            // Console turns have no forum notification to acknowledge, including after a restart.
+            acknowledgeCompletedConsoleTurns(session)
+            val pending = session.pendingTurnId
+            if (pending != null)
+            {
+                if (isConsoleTurn(pending))
+                    processConsoleTurn(runtime, pending, ChatMessages.empty(), session.pendingDeliveryIds)
+                else work(user, instructions, session, images, scope)
+                nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                continue
+            }
+
+            val remainingMillis = TimeUnit.NANOSECONDS.toMillis(nextPoll - System.nanoTime()).coerceAtLeast(0)
+            val message = runtime.nextMessage(remainingMillis)
+            if (message != null)
+                processConsoleTurn(runtime, message.id, ChatMessages(Role.USER, message.text), listOf(message.id))
+            if (System.nanoTime() >= nextPoll)
+            {
+                work(user, instructions, session, images, scope)
+                nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            }
+        }
+    }
+    finally
+    {
+        ConversationRuntime.detach(runtime)
+        val abandoned = runtime.close()
+        if (abandoned > 0) logger.warning("Discarded $abandoned queued console messages during shutdown; they were not sent")
     }
 }
 
-private fun currentSessionScope(model: AiConfig.LlmModel): String =
+internal fun currentSessionScope(model: AiConfig.LlmModel): String =
     responsesSessionScope(mainConfig.url, mainConfig.username, model.url, model.key.first())
 
 var blackList: Set<Int>
@@ -202,8 +232,6 @@ private suspend fun work(
     }
     val notifications = user.getUnreadNotifications()
     if (notifications.isNotEmpty()) logger.info("Processing a batch of ${notifications.size} unread notifications in the Responses conversation")
-    val tools = AiToolSet(Forum(user, blackList, images = images), ReadImage()).getTools(null, model)
-
     processNotifications(
         notifications = notifications,
         pendingTurnId = session.pendingTurnId,
@@ -211,78 +239,11 @@ private suspend fun work(
         completedUnacknowledgedTurnIds = session.completedUnacknowledgedTurnIds,
         isCompleted = session::isCompleted,
         process = { turnId, batch ->
-            val defaultPrinter = MessagePrinter(
-                reasoningColor = SimpleAnsiColor.CYAN,
-                messageColor = SimpleAnsiColor.CYAN,
-                thinkingTagColor = SimpleAnsiColor.GREEN,
+            processConversationTurn(
+                user, instructions, session, images, startupScope, turnId,
+                batch?.let(::notificationInput) ?: ChatMessages.empty(),
+                batch?.map { "notification:${it.notificationId}" } ?: session.pendingDeliveryIds,
             )
-            var toolPrinter: MessagePrinter? = null
-            val result = try
-            {
-                sendAiRequest(
-                    model = model,
-                    messages = batch?.let(::notificationInput) ?: ChatMessages.empty(),
-                    instructions = instructions,
-                    tools = tools,
-                    session = session,
-                    turnId = turnId,
-                    deliveryIds = batch?.map { "notification:${it.notificationId}" } ?: session.pendingDeliveryIds,
-                    stream = true,
-                    onGeneratedImage = { image ->
-                        images.save(image.id, image.base64, image.format)
-                        "图片已保存，imageId=${image.id}。如需在论坛发送，请调用upload_generated_image并传入该imageId与目标topicId，获得Markdown后放入send_post的内容。"
-                    },
-                ) { slice ->
-                    if (slice is StreamAiResponseSlice.Message)
-                    {
-                        toolPrinter?.flush()
-                        toolPrinter = null
-                        defaultPrinter.put(slice.reasoningContent, true)
-                        defaultPrinter.put(slice.content, false)
-                    }
-                    else
-                    {
-                        defaultPrinter.flush()
-                        if (slice is StreamAiResponseSlice.ToolMessage)
-                        {
-                            toolPrinter = toolPrinter ?: MessagePrinter(
-                                reasoningColor = SimpleAnsiColor.YELLOW,
-                                messageColor = SimpleAnsiColor.YELLOW,
-                                thinkingTagColor = SimpleAnsiColor.BLUE,
-                            )
-                            toolPrinter!!.put(slice.reasoningContent.toText(), false)
-                        }
-                        else
-                        {
-                            toolPrinter?.flush()
-                            toolPrinter = null
-                        }
-                        if (slice is StreamAiResponseSlice.ToolCall)
-                            logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${slice.tool.name}>${slice.parms}</tool>" + AnsiStyle.RESET)
-                    }
-                }
-            }
-            finally
-            {
-                toolPrinter?.flush()
-                defaultPrinter.flush()
-            }
-            when (result)
-            {
-                is AiResult.Success -> {
-                    logger.fine("Completed $turnId in the Responses conversation")
-                    true
-                }
-                is AiResult.UnknownError -> {
-                    logger.severe("Responses batch $turnId failed and was discarded", result.error)
-                    false
-                }
-                is AiResult.Cancelled -> throw CancellationException("Responses batch $turnId was cancelled")
-                else -> {
-                    logger.severe("Responses batch $turnId failed and was discarded: ${result::class.simpleName}")
-                    false
-                }
-            }
         },
         acknowledge = { notificationId ->
             user.markAsRead(notificationId).also { success ->
@@ -295,4 +256,128 @@ private suspend fun work(
             }
         },
     )
+}
+
+
+internal fun isConsoleTurn(turnId: String): Boolean = turnId.startsWith("command:")
+
+internal fun acknowledgeCompletedConsoleTurns(session: ResponsesSession)
+{
+    session.completedUnacknowledgedTurnIds.filter(::isConsoleTurn).forEach(session::acknowledge)
+}
+
+internal suspend fun processConsoleDelivery(
+    session: ResponsesSession,
+    turnId: String,
+    process: suspend () -> Boolean,
+): Boolean
+{
+    require(isConsoleTurn(turnId))
+    try { return process() }
+    finally { if (session.isCompleted(turnId)) session.acknowledge(turnId) }
+}
+
+private suspend fun processConsoleTurn(
+    runtime: ConversationRuntime,
+    turnId: String,
+    messages: ChatMessages,
+    deliveryIds: List<String>,
+)
+{
+    logger.info("Processing console message $turnId in the Responses conversation")
+    processConsoleDelivery(runtime.session, turnId)
+    {
+        processConversationTurn(runtime.user, runtime.instructions, runtime.session, runtime.images,
+            runtime.startupScope, turnId, messages, deliveryIds)
+    }
+}
+
+private suspend fun processConversationTurn(
+    user: LoginData,
+    instructions: String,
+    session: ResponsesSession,
+    images: GeneratedImageStore,
+    startupScope: String,
+    turnId: String,
+    messages: ChatMessages,
+    deliveryIds: List<String>,
+): Boolean
+{
+    val model = aiConfig.model
+    check(currentSessionScope(model) == startupScope) {
+        "Forum identity or Responses endpoint/key changed. Restore matching configuration and restart."
+    }
+    val tools = AiToolSet(Forum(user, blackList, images = images), ReadImage()).getTools(null, model)
+    val defaultPrinter = MessagePrinter(
+        reasoningColor = SimpleAnsiColor.CYAN,
+        messageColor = SimpleAnsiColor.CYAN,
+        thinkingTagColor = SimpleAnsiColor.GREEN,
+    )
+    var toolPrinter: MessagePrinter? = null
+    val result = try
+    {
+        sendAiRequest(
+            model = model,
+            messages = messages,
+            instructions = instructions,
+            tools = tools,
+            session = session,
+            turnId = turnId,
+            deliveryIds = deliveryIds,
+            stream = true,
+            onGeneratedImage = { image ->
+                images.save(image.id, image.base64, image.format)
+                "图片已保存，imageId=${image.id}。如需在论坛发送，请调用upload_generated_image并传入该imageId与目标topicId，获得Markdown后放入send_post的内容。"
+            },
+        ) { slice ->
+            if (slice is StreamAiResponseSlice.Message)
+            {
+                toolPrinter?.flush()
+                toolPrinter = null
+                defaultPrinter.put(slice.reasoningContent, true)
+                defaultPrinter.put(slice.content, false)
+            }
+            else
+            {
+                defaultPrinter.flush()
+                if (slice is StreamAiResponseSlice.ToolMessage)
+                {
+                    toolPrinter = toolPrinter ?: MessagePrinter(
+                        reasoningColor = SimpleAnsiColor.YELLOW,
+                        messageColor = SimpleAnsiColor.YELLOW,
+                        thinkingTagColor = SimpleAnsiColor.BLUE,
+                    )
+                    toolPrinter!!.put(slice.reasoningContent.toText(), false)
+                }
+                else
+                {
+                    toolPrinter?.flush()
+                    toolPrinter = null
+                }
+                if (slice is StreamAiResponseSlice.ToolCall)
+                    logger.info(SimpleAnsiColor.PURPLE.toString() + "<tool: ${slice.tool.name}>${slice.parms}</tool>" + AnsiStyle.RESET)
+            }
+        }
+    }
+    finally
+    {
+        toolPrinter?.flush()
+        defaultPrinter.flush()
+    }
+    return when (result)
+    {
+        is AiResult.Success -> {
+            logger.fine("Completed $turnId in the Responses conversation")
+            true
+        }
+        is AiResult.UnknownError -> {
+            logger.severe("Responses batch $turnId failed and was discarded", result.error)
+            false
+        }
+        is AiResult.Cancelled -> throw CancellationException("Responses batch $turnId was cancelled")
+        else -> {
+            logger.severe("Responses batch $turnId failed and was discarded: ${result::class.simpleName}")
+            false
+        }
+    }
 }

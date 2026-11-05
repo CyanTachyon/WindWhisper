@@ -266,6 +266,32 @@ private fun safeRequestFailure(error: Throwable): String = when (error)
     else -> error.httpStatus()?.let { "HTTP $it" } ?: error.javaClass.simpleName
 }
 
+/** Count the saved request context without generating a response or executing tools. */
+internal suspend fun countResponsesInputTokens(
+    model: AiConfig.LlmModel,
+    input: List<JsonObject>,
+    instructions: String,
+    previousResponseId: String?,
+    tools: List<AiToolInfo<*>>,
+): Long
+{
+    val request = buildResponsesRequest(model, input, instructions, previousResponseId, tools, stream = false)
+    val countFields = setOf("model", "input", "instructions", "previous_response_id", "tools",
+        "tool_choice", "parallel_tool_calls", "reasoning", "text", "truncation", "personality")
+    val response = withResponsesRequestTimeout(aiConfig.timeout) {
+        defaultAiClient.post("${model.url.trimEnd('/')}/input_tokens") {
+            bearerAuth(model.key.first())
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(request.filterKeys { it in countFields }))
+        }.let { it.status to it.bodyAsText() }
+    }
+    if (!response.first.isSuccess()) throw AiHttpException(response.first.value, response.second)
+    val count = contentNegotiationJson.parseToJsonElement(response.second).jsonObject["input_tokens"]
+        ?.jsonPrimitive?.longOrNull
+    require(count != null && count >= 0) { "Responses token count is missing or invalid" }
+    return count
+}
+
 private suspend fun retrieveResponse(model: AiConfig.LlmModel, id: String): RequestResult = try
 {
     require(id.matches(Regex("[A-Za-z0-9_-]+"))) { "Invalid saved response ID" }

@@ -15,6 +15,8 @@ object CommandSet: TreeCommand(
     Color,
     Run,
     Code,
+    Send,
+    Context,
 ), CommandHandler
 {
     private val logger = WindWhisperLogger.getLogger()

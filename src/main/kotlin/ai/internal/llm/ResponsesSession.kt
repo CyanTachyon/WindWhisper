@@ -39,6 +39,7 @@ class ResponsesSession(private val file: File? = null, private val scope: String
 {
     internal val mutex = Mutex()
     private val json = Json { encodeDefaults = true; prettyPrint = true }
+    @Volatile
     internal var state: SessionState = file?.takeIf { it.exists() }?.let {
         json.decodeFromString<SessionState>(it.readText()).also { loaded ->
             require(loaded.scope == scope) {

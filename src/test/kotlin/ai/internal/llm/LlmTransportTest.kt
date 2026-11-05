@@ -28,6 +28,37 @@ class LlmTransportTest
     fun setUp() = initializeTestEnvironment()
 
     @Test
+    fun `context count uses the count endpoint and preserves request context without generation`() = runBlocking {
+        val calls = mutableListOf<String>()
+        val input = listOf(toolOutput("call_previous", "Saved tool result"), userInput("Next message"))
+        MockServer { index, request ->
+            assertEquals(0, index)
+            assertEquals("POST", request.method)
+            assertEquals("/v1/responses/input_tokens", request.path)
+            assertEquals("Bearer unit-test-key", request.authorization)
+            assertEquals(JsonPrimitive("test-model"), request.body["model"])
+            assertEquals(JsonPrimitive("resp_previous"), request.body["previous_response_id"])
+            assertEquals(JsonPrimitive(INSTRUCTIONS), request.body["instructions"])
+            assertEquals(input, request.input())
+            val tools = request.body.getValue("tools").jsonArray.map { it.jsonObject }
+            assertEquals(listOf("function", "web_search", "image_generation"), tools.map { it.getValue("type").jsonPrimitive.content })
+            assertEquals(JsonPrimitive("echo"), tools.first()["name"])
+            assertEquals(JsonPrimitive("string"), tools.first().getValue("parameters").jsonObject
+                .getValue("properties").jsonObject.getValue("text").jsonObject["type"])
+            for (field in listOf("store", "stream", "context_management", "background"))
+                assertFalse(field in request.body, "Token counting must not send $field")
+            MockResponse(json("""{"object":"response.input_tokens","input_tokens":12345}"""))
+        }.use { server ->
+            val count = bounded { countResponsesInputTokens(server.model(), input, INSTRUCTIONS,
+                "resp_previous", listOf(echoTool(calls))) }
+            server.verify()
+            assertEquals(12345L, count)
+            assertEquals(1, server.requests.size)
+            assertTrue(calls.isEmpty())
+        }
+    }
+
+    @Test
     fun `native search and local tools continue with only tool output and keep citations`() = runBlocking {
         val calls = mutableListOf<String>()
         val session = ResponsesSession()
