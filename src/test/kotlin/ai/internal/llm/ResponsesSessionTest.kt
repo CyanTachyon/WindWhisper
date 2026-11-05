@@ -48,9 +48,7 @@ class ResponsesSessionTest
             assertNull(restored.pendingTurnId)
             assertEquals("resp_good", restored.state.previousResponseId)
             assertTrue(restored.isCompleted("notification:1") && restored.isCompleted("notification:2"))
-            assertEquals(listOf(output, receipt), restored.state.deferredInput.take(2))
-            assertEquals(3, restored.state.deferredInput.size)
-            assertEquals(JsonPrimitive("developer"), restored.state.deferredInput.last()["role"])
+            assertEquals(listOf(output, receipt), restored.state.deferredInput)
             assertFalse(restored.state.deferredInput.any { it["role"] == JsonPrimitive("user") })
             val deferred = restored.state.deferredInput
             assertTrue(restored.begin("batch:new", listOf(user("New notification")), listOf("notification:3")))

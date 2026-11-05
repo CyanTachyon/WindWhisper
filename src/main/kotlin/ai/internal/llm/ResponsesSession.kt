@@ -105,12 +105,11 @@ class ResponsesSession(private val file: File? = null, private val scope: String
                 put("type", "function_call_output")
                 put("call_id", id)
                 put("output", if (id == turn.executingToolId)
-                    "本批处理已终止，此操作的执行结果未确认。禁止自动重试，请以后以论坛实际状态为准。"
-                else "本批处理已失败，此调用未执行。不要在后续通知中补做此调用。")
+                    "本批处理已终止，此操作的执行结果未确认。"
+                else "本批处理已失败，此调用未执行。")
             } }
         else turn.input.filter { it["type"] == JsonPrimitive("function_call_output") || it["role"] == JsonPrimitive("developer") }
-        completeDeliveries(if (retainExecutedResponse) turn.responseId else state.previousResponseId,
-            carried.filterNot { it == abortedBatchNotice } + abortedBatchNotice)
+        completeDeliveries(if (retainExecutedResponse) turn.responseId else state.previousResponseId, carried)
     }
 
     private fun completeDeliveries(responseId: String?, deferredInput: List<JsonObject>)
@@ -120,11 +119,6 @@ class ResponsesSession(private val file: File? = null, private val scope: String
             completedTurnIds = (state.completedTurnIds + turn.deliveryIds + turn.id).distinct().takeLast(2048),
             unacknowledgedTurnIds = (state.unacknowledgedTurnIds + turn.deliveryIds).distinct()))
     }
-}
-
-private val abortedBatchNotice = buildJsonObject {
-    put("role", "developer")
-    put("content", "上一批论坛通知处理失败，现已终止。部分操作可能已完成或结果未确认；不要重试、继续或补做上一批任务。后续只处理新的通知。")
 }
 
 /** Avoid mixing state across accounts without storing API keys in the session file. */

@@ -166,8 +166,7 @@ class LlmTransportTest
                 assertEquals(listOf("failed-turn"), session.completedUnacknowledgedTurnIds)
                 assertNull(session.pendingTurnId)
                 assertEquals(1, server.requests.size, "$kind must not retry")
-                assertEquals(1, session.state.deferredInput.size)
-                assertTrue(session.state.deferredInput.all { it["role"] == JsonPrimitive("developer") })
+                assertTrue(session.state.deferredInput.isEmpty())
             }
         }
     }
@@ -179,8 +178,7 @@ class LlmTransportTest
             if (index == 0) MockResponse(json("""{"error":{"message":"temporarily unavailable"}}"""), status = 503)
             else {
                 assertEquals(1, index)
-                assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
-                assertTrue(request.input().first()["role"] == JsonPrimitive("developer"))
+                assertEquals(listOf(userInput("New notification")), request.input())
                 MockResponse(completed("resp_next", listOf(message("Handled new notification"))))
             }
         }.use { server ->
@@ -350,9 +348,10 @@ class LlmTransportTest
             MockServer { index, request ->
                 assertEquals(0, index)
                 assertCommonRequest(request, "resp_tools")
-                assertEquals(listOf("call_uncertain"), request.input().filter { it["type"] == JsonPrimitive("function_call_output") }
-                    .map { it.getValue("call_id").jsonPrimitive.content })
-                assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
+                assertEquals(listOf(
+                    toolOutput("call_uncertain", "本批处理已终止，此操作的执行结果未确认。"),
+                    userInput("New notification"),
+                ), request.input())
                 MockResponse(completed("resp_new", listOf(message("New batch complete"))))
             }.use { server ->
                 val session = ResponsesSession(file, "account-a")
@@ -399,14 +398,12 @@ class LlmTransportTest
                     0 -> MockResponse(completed("resp_write", listOf(call("call_saved", "echo", "saved"),
                         call("call_write", "write_post", "post once"), call("call_unexecuted", "echo", "must not run"))))
                     1 -> {
-                        val input = request.input()
-                        val outputs = input.filter { it["type"] == JsonPrimitive("function_call_output") }
-                        assertEquals(listOf("call_saved", "call_write", "call_unexecuted"), outputs.map { it.getValue("call_id").jsonPrimitive.content })
-                        assertEquals(toolOutput("call_saved", "echo:saved"), outputs.first())
-                        assertTrue(outputs.drop(1).all { it.getValue("output").jsonPrimitive.content.isNotBlank() })
-                        assertEquals(listOf(userInput("Next batch")), input.filter { it["role"] == JsonPrimitive("user") })
-                        assertTrue(input.any { it["role"] == JsonPrimitive("developer") })
-                        assertEquals(userInput("Next batch"), input.last())
+                        assertEquals(listOf(
+                            toolOutput("call_saved", "echo:saved"),
+                            toolOutput("call_write", "本批处理已终止，此操作的执行结果未确认。"),
+                            toolOutput("call_unexecuted", "本批处理已失败，此调用未执行。"),
+                            userInput("Next batch"),
+                        ), request.input())
                         MockResponse(completed("resp_next", listOf(message("Next batch done"))))
                     }
                     else -> error("No failed batch or executed tool may be replayed")
@@ -459,9 +456,7 @@ class LlmTransportTest
                         if (stream) MockResponse.sse(created("resp_invalid_image"), terminal(response)) else MockResponse(response)
                     }
                     1 -> {
-                        assertEquals(listOf(userInput("Only new notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
-                        assertFalse(request.input().any { it["type"] == JsonPrimitive("function_call_output") })
-                        assertTrue(request.input().any { it["role"] == JsonPrimitive("developer") })
+                        assertEquals(listOf(userInput("Only new notification")), request.input())
                         MockResponse(completed("resp_new", listOf(message("New notification handled"))))
                     }
                     else -> error("Invalid completed response must never be polled or resubmitted")
@@ -515,8 +510,7 @@ class LlmTransportTest
                             else MockResponse(failed)
                         }
                         1 -> {
-                            assertEquals(listOf(userInput("New notification")), request.input().filter { it["role"] == JsonPrimitive("user") })
-                            assertTrue(request.input().any { it["role"] == JsonPrimitive("developer") })
+                            assertEquals(listOf(userInput("New notification")), request.input())
                             MockResponse(completed("resp_new", listOf(message("New batch complete"))))
                         }
                         else -> error("Unexpected request $index")
