@@ -4,7 +4,7 @@ An AI bot based on the Discourse forum system. This project aims to add a person
 ## Brief Feature Description
 
 - Supports all websites using the Discourse forum system
-- Supports any OpenAI API-compatible model
+- Supports OpenAI API-compatible models with native function calling
 - The AI can read posts on the forum, reply, and give likes. It maintains memory continuity across different posts.
 - Upon receiving a notification, if the notification is related to a specific topic, the AI will automatically process that topic.
 - [Optional]Enables the AI to perform web searches, read URL content, etc.
@@ -26,7 +26,7 @@ After compilation completes, the `WindWhisper.jar` file will be generated in the
 
 ### Step 2: Preparation
 1. Register an account on the target forum and note down the username and password.
-2. Choose an OpenAI API-compatible model and obtain an API Key.
+2. Choose an OpenAI API-compatible model and provider with native function calling, and obtain an API key.
 3. This project's web search tool relies on [tavily](https://tavily.com). If you want the AI to be able to search the web, you need to register a tavily account and obtain an API Key. This step is optional.
 
 ### Step 3: Initialization
@@ -72,7 +72,6 @@ model:
   url: "https://your.openai.api/endpoint/v1/chat/completions" # Note: full URL is required, including /v1/chat/completions
   key: ["your openai_api_key"] # If multiple keys are provided, one will be randomly selected for each use.
   model: "gpt-4" # Choose the model you want to use
-  toolable: true # Whether tool calling is supported. Currently must be true
   imageable: false # Whether visual capabilities are supported. This feature is not currently implemented
   customRequestParms: # Optional, custom request body fields
     temperature: 0.7

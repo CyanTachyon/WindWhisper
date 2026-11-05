@@ -1,5 +1,4 @@
 @file:Suppress("unused")
-@file:OptIn(ExperimentalUuidApi::class)
 
 package moe.tachyon.windwhisper.ai.internal.llm
 
@@ -12,9 +11,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.filterNot
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -39,9 +36,6 @@ import moe.tachyon.windwhisper.utils.JsonSchema
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import moe.tachyon.windwhisper.utils.toJsonElement
 import kotlin.collections.set
-import kotlin.random.Random
-import kotlin.uuid.ExperimentalUuidApi
-import kotlin.uuid.Uuid
 
 @Serializable
 private sealed interface AiResponse
@@ -69,7 +63,7 @@ private sealed interface AiResponse
             data class ToolCall(
                 val id: String? = null,
                 val index: Int? = null,
-                val function: Function,
+                val function: Function? = null,
             )
             {
                 @Suppress("RedundantNullableReturnType")
@@ -106,7 +100,7 @@ private sealed interface AiResponse
 @Serializable
 private data class DefaultAiResponse(
     override val choices: List<Choice>,
-    override val usage: TokenUsage?,
+    override val usage: TokenUsage? = null,
 ): AiResponse
 {
     @Serializable
@@ -119,7 +113,7 @@ private data class DefaultAiResponse(
     {
         @Serializable
         data class Message(
-            override val content: String,
+            override val content: String? = null,
             @SerialName("reasoning_content")
             override val reasoningContent: String? = null,
             @SerialName("tool_calls")
@@ -153,7 +147,7 @@ private data class StreamAiResponse(
             @SerialName("reasoning_text")
             val reasoningContent2: String? = null,
             @SerialName("tool_calls")
-            override val toolCalls: List<AiResponse.Choice.Message.ToolCall> = emptyList(),
+            override val toolCalls: List<AiResponse.Choice.Message.ToolCall>? = null,
         ): AiResponse.Choice.Message
         {
             override val reasoningContent: String?
@@ -250,7 +244,7 @@ private data class AiRequest(
     }
 }
 
-private fun ChatMessages.toRequestMessages(escapeToolCalls: Boolean): List<AiRequest.Message>
+private fun ChatMessages.toRequestMessages(): List<AiRequest.Message>
 {
     fun ChatMessage.toRequestMessage(): AiRequest.Message?
     {
@@ -265,22 +259,11 @@ private fun ChatMessages.toRequestMessages(escapeToolCalls: Boolean): List<AiReq
         }
 
         return AiRequest.Message(
-            role =
-                if (escapeToolCalls && this.role is Role.TOOL) Role.USER.role
-                else this.role.role,
-            content =
-                if (escapeToolCalls && this.role is Role.TOOL) Content("<|tool_call_result|>\n${toolCallNameTag}\n${this.role.name}${toolCallNameTag}\n<|tool_response|>\n") + this.content + Content(
-                    "\n<|tool_response|>\n<|tool_call_result|>"
-                )
-                else if (escapeToolCalls && this.role is Role.ASSISTANT) this.content + Content(this.toolCalls.flatMap {
-                    Content(
-                        "$toolCallTag\n$toolCallNameTag${it.name}$toolCallNameTag\n${toolCallArgsTag}\n${it.arguments}\n${toolCallArgsTag}\n${toolCallTag}"
-                    )
-                })
-                else this.content,
+            role = this.role.role,
+            content = this.content,
             reasoningContent = this.reasoningContent.takeIf { it.isNotEmpty() && this.role is Role.ASSISTANT } ?: Content(),
-            toolCallId = (this.role as? Role.TOOL)?.id?.takeUnless { escapeToolCalls },
-            toolCalls = (this.toolCalls.takeUnless { escapeToolCalls } ?: emptyList()).map { AiRequest.Message.ToolCall(it.id, function = AiRequest.Message.ToolCall.Function(it.name, it.arguments)) },
+            toolCallId = (this.role as? Role.TOOL)?.id,
+            toolCalls = this.toolCalls.map { AiRequest.Message.ToolCall(it.id, function = AiRequest.Message.ToolCall.Function(it.name, it.arguments)) },
         )
     }
 
@@ -391,7 +374,7 @@ suspend fun sendAiRequest(
             val url = context.model.url
             val body = AiRequest(
                 model = context.model.model,
-                messages = beforeLlmRequestContext.requestMessage.toRequestMessages(!model.supportToolCalls),
+                messages = beforeLlmRequestContext.requestMessage.toRequestMessages(),
                 stream = stream,
                 maxTokens = context.maxTokens,
                 thinkingBudget = context.model.thinkingBudget,
@@ -418,19 +401,23 @@ suspend fun sendAiRequest(
             val requestResult = run()
             {
                 val errors = mutableListOf<Throwable>()
+                var lastResult: RequestResult? = null
                 repeat(aiConfig.retry)
                 {
                     currentCoroutineContext().ensureActive()
                     val tmp = sendRequest(url, context.model.key.random(), body, stream, onReceive)
+                    if (tmp.error is CancellationException) throw tmp.error!!
+                    if (tmp.error == null && !tmp.message.isBlank()) return@run tmp
+                    if (tmp.error == null) tmp.error = UnknownAiResponseException(message = "AI请求返回空响应")
                     tmp.error?.let(errors::add)
-                    tmp.error =
-                        if (errors.size <= 1) errors.firstOrNull()
-                        else errors.map(::UnknownAiResponseException).let(::AiRetryFailedException)
+                    lastResult = tmp
+                    // A partially delivered response must not be replayed into the UI or execute tools.
                     if (!tmp.message.isBlank()) return@run tmp
                 }
-                RequestResult(emptyMap(),
-                    ChatMessage(Role.ASSISTANT, ""),
-                    TokenUsage(), if (errors.size == 1) errors[0] else errors.map(::UnknownAiResponseException).let(::AiRetryFailedException))
+                lastResult!!.also {
+                    it.error = if (errors.size == 1) errors[0]
+                    else errors.map(::UnknownAiResponseException).let(::AiRetryFailedException)
+                }
             }
 
             plugins.filterIsInstance<AfterLlmResponse>().forEach()
@@ -439,12 +426,12 @@ suspend fun sendAiRequest(
             }
 
             val (waitingTools, curMsg, usage0, e) = requestResult
-            if (!curMsg.content.isEmpty() || !curMsg.reasoningContent.isEmpty() || !curMsg.toolCalls.isEmpty()) res += curMsg
+            if (!curMsg.isBlank()) res += curMsg
             usage += usage0
             if (e != null) throw e
             if (waitingTools.isNotEmpty())
             {
-                val parseToolCalls = parseToolCalls(waitingTools, tools, onReceive)
+                val parseToolCalls = parseToolCalls(waitingTools, context.tools, onReceive)
                 res += parseToolCalls
                 parseToolCalls.filter { it.role is Role.SHOWING_DATA }.forEach()
                 {
@@ -456,11 +443,11 @@ suspend fun sendAiRequest(
     }
     catch (e: Throwable)
     {
-        return when (e)
+        return when
         {
-            is CancellationException -> AiResult.Cancelled(res.toChatMessages(), usage)
-            is SSEClientException if (e.response?.status?.value == 429) -> AiResult.TooManyRequests(res.toChatMessages(), usage)
-            is SSEClientException if (e.response?.status?.value in listOf(500, 502, 504)) -> AiResult.ServiceError(res.toChatMessages(), usage)
+            e is CancellationException -> AiResult.Cancelled(res.toChatMessages(), usage)
+            e.httpStatus() == 429 -> AiResult.TooManyRequests(res.toChatMessages(), usage)
+            e.httpStatus() in listOf(500, 502, 503, 504) -> AiResult.ServiceError(res.toChatMessages(), usage)
             else -> AiResult.UnknownError(res.toChatMessages(), usage, e)
         }
     }
@@ -474,24 +461,61 @@ data class RequestResult(
     var error: Throwable?,
 )
 
-const val toolCallTag = "<|tool_call|>"
-const val toolCallNameTag = "<|tool_name|>"
-const val toolCallArgsTag = "<|tool_args|>"
-val toolNameRegex = Regex("<\\|tool_name\\|>(.*?)<\\|tool_name\\|>", RegexOption.DOT_MATCHES_ALL)
-val toolArgsRegex = Regex("<\\|tool_args\\|>(.*?)<\\|tool_args\\|>", RegexOption.DOT_MATCHES_ALL)
+private class AiHttpException(val status: Int, body: String): Exception("AI请求返回异常，HTTP状态码 $status, 响应体: $body")
 
+private fun Throwable.httpStatus(): Int? = when (this)
+{
+    is AiHttpException -> status
+    is SSEClientException -> response?.status?.value
+    is AiRetryFailedException -> exceptions.lastOrNull()?.httpStatus()
+    else -> cause?.takeUnless { it === this }?.httpStatus()
+}
+
+private fun checkChatFinishReason(reason: AiResponse.FinishReason?)
+{
+    if (reason != null && reason != AiResponse.FinishReason.STOP && reason != AiResponse.FinishReason.TOOL_CALLS)
+        throw UnknownAiResponseException(message = "Chat Completions 响应未完成: $reason")
+}
+
+private fun validatedChatToolCalls(calls: List<AiResponse.Choice.Message.ToolCall>): Map<String, Pair<String, String>>
+{
+    val result = linkedMapOf<String, Pair<String, String>>()
+    calls.forEach { call ->
+        val id = call.id
+        val name = call.function?.name
+        val arguments = call.function?.arguments
+        require(call.type == "function") { "Chat Completions 返回了不支持的工具调用类型" }
+        require(!id.isNullOrBlank()) { "Chat Completions 工具调用缺少 id" }
+        require(!name.isNullOrBlank()) { "Chat Completions 工具调用缺少 function.name" }
+        require(arguments != null) { "Chat Completions 工具调用缺少 function.arguments" }
+        require(id !in result) { "Chat Completions 工具调用包含重复 id" }
+        result[id] = name to arguments
+    }
+    return result
+}
+
+private class PendingChatToolCall
+{
+    var id: String? = null
+    val name = StringBuilder()
+    val arguments = StringBuilder()
+    var hasArguments = false
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
 private suspend fun sendRequest(
     url: String,
     key: String,
     body: JsonElement,
     stream: Boolean,
     onReceive: suspend (StreamAiResponseSlice) -> Unit,
-    useCustomToolCall: Boolean = true,
 ): RequestResult
 {
     logger.config("AI请求$url : ${contentNegotiationJson.encodeToString(body)}")
+    var usage = TokenUsage()
+    var message = ChatMessage(Role.ASSISTANT, "")
 
-    if (!stream) runCatching()
+    if (!stream) return try
     {
         val response = defaultAiClient.post(url)
         {
@@ -501,234 +525,102 @@ private suspend fun sendRequest(
             setBody(body)
         }
         val responseBody = response.bodyAsText()
-        val json = contentNegotiationJson.parseToJsonElement(responseBody)
-        val res = runCatching()
-        {
-            contentNegotiationJson.decodeFromJsonElement<DefaultAiResponse>(json)
-        }.onFailure()
-        {
-            logger.warning("AI请求返回异常: $json")
-        }.getOrThrow()
-        val msg = ChatMessage(
+        if (!response.status.isSuccess()) throw AiHttpException(response.status.value, responseBody)
+        val responseData = contentNegotiationJson.decodeFromString<DefaultAiResponse>(responseBody)
+        usage = responseData.usage ?: TokenUsage()
+        message = ChatMessage(
             role = Role.ASSISTANT,
-            content = res.choices.joinToString("") { it.message.content }.let(::Content),
-            reasoningContent = res.choices.joinToString("") { it.message.reasoningContent ?: "" }.let(::Content)
+            content = Content(responseData.choices.joinToString("") { it.message.content.orEmpty() }),
+            reasoningContent = Content(responseData.choices.joinToString("") { it.message.reasoningContent.orEmpty() }),
         )
-        val usage = res.usage
-        val calls = res.choices.mapNotNull { it.message.toolCalls }.flatten().mapNotNull()
-        {
-            it.id ?: return@mapNotNull null
-            it.id to ((it.function.name ?: "") to (it.function.arguments ?: ""))
-        }.toMap()
-        return RequestResult(calls, msg, usage ?: TokenUsage(), null)
-    }.onFailure()
+        responseData.choices.forEach { checkChatFinishReason(it.finishReason) }
+        val calls = validatedChatToolCalls(responseData.choices.flatMap { it.message.toolCalls.orEmpty() })
+        message = message.copy(toolCalls = calls.map { (id, call) -> ChatMessage.ToolCall(id, call.first, call.second) })
+        RequestResult(calls, message, usage, null)
+    }
+    catch (error: Throwable)
     {
-        return RequestResult(emptyMap(), ChatMessage(Role.ASSISTANT, ""), TokenUsage(), it)
+        RequestResult(emptyMap(), message, usage, error)
     }
 
-
-    var usage0 = TokenUsage()
-    val waitingTools = mutableMapOf<Int, Pair<String, String>>()
-    var lstIndex = -1
-    var curMsg = ChatMessage(Role.ASSISTANT, "")
-    val responses = mutableListOf<StreamAiResponse>()
-    val loopId = Uuid.random().toHexString()
+    // Each choice has its own tool indexes. Never infer a missing index or manufacture call IDs.
+    val waitingTools = mutableMapOf<Pair<Int, Int>, PendingChatToolCall>()
     var done = false
-
-    val r = runCatching()
+    return try
     {
         streamAiClient.sse(url, {
             method = HttpMethod.Post
             bearerAuth(key)
             contentType(ContentType.Application.Json)
-            accept(ContentType.Any)
+            accept(ContentType.Text.EventStream)
             setBody(contentNegotiationJson.encodeToString(body))
         })
         {
             if (!call.response.status.isSuccess())
-                throw SSEClientException(call.response, message = "AI请求返回异常，HTTP状态码 ${call.response.status.value}, 响应体: ${call.response.bodyAsText()}")
-            val buffer = StringBuilder()
-            incoming
-                .mapNotNull { it.data }
-                .filterNot {
-                    done = done || it.trim() == "[DONE]"
-                    done
-                }
-                .map()
+                throw AiHttpException(call.response.status.value, call.response.bodyAsText())
+            incoming.transformWhile { event ->
+                val data = event.data
+                if (data?.trim() == "[DONE]")
                 {
-                    runCatching()
+                    done = true
+                    false
+                }
+                else
+                {
+                    if (!data.isNullOrBlank())
                     {
-                        contentNegotiationJson.decodeFromString<StreamAiResponse>(it)
-                    }.onFailure { e ->
-                        logger.warning("无法解析AI返回的数据流, data: $it")
-                    }.getOrThrow()
-                }
-                .collect()
-                {
-                    responses += it
-                    if (it.usage != null && it.usage.totalTokens > usage0.totalTokens)
-                        usage0 = it.usage
-                    it.choices.forEach()
-                    { c ->
-                        c.message.toolCalls.forEach()
-                        { tool ->
-                            val index = tool.index ?: lstIndex.takeIf { it1 -> it1 > 0 }
-                            if (index == null)
+                        val chunk = contentNegotiationJson.decodeFromString<StreamAiResponse>(data)
+                        chunk.usage?.let { usage = it }
+                        chunk.choices.forEach { choice ->
+                            val content = choice.message.content.orEmpty()
+                            val reasoning = choice.message.reasoningContent.orEmpty()
+                            if (content.isNotEmpty() || reasoning.isNotEmpty())
                             {
-                                logger.warning("出现错误: 工具调用ID丢失，无法将工具调用名称与参数对应。 id: ${tool.id}, lstIndex: $lstIndex waitingTools: $waitingTools")
+                                message += ChatMessage(Role.ASSISTANT, content, reasoning)
+                                onReceive(StreamAiResponseSlice.Message(content, reasoning))
                             }
-                            else if (tool.function.name.isNullOrEmpty())
-                            {
-                                val (name, args) = waitingTools[index] ?: ("" to "")
-                                val newArg = args + (tool.function.arguments ?: "")
-                                waitingTools[index] = name to newArg
-                                lstIndex = index
-                            }
-                            else
-                            {
-                                lstIndex = tool.index ?: (lstIndex + 1)
-                                waitingTools[lstIndex] = tool.function.name to (tool.function.arguments ?: "")
-                            }
-                        }
-
-                        if (!c.message.reasoningContent.isNullOrEmpty())
-                        {
-                            onReceive(
-                                StreamAiResponseSlice.Message(
-                                    content = "",
-                                    reasoningContent = c.message.reasoningContent ?: "",
-                                )
-                            )
-                            curMsg += ChatMessage(
-                                role = Role.ASSISTANT,
-                                content = "",
-                                reasoningContent = c.message.reasoningContent ?: "",
-                            )
-                            return@forEach
-                        }
-
-                        if (!useCustomToolCall)
-                        {
-                            if (!c.message.content.isNullOrEmpty())
-                            {
-                                onReceive(
-                                    StreamAiResponseSlice.Message(
-                                        content = c.message.content,
-                                        reasoningContent = "",
-                                    )
-                                )
-                                curMsg += ChatMessage(
-                                    role = Role.ASSISTANT,
-                                    content = c.message.content,
-                                )
-                            }
-                            return@forEach
-                        }
-
-                        val putContent: suspend (String) -> Unit = { contentPart ->
-                            onReceive(
-                                StreamAiResponseSlice.Message(
-                                    content = contentPart,
-                                    reasoningContent = "",
-                                )
-                            )
-                            curMsg += ChatMessage(
-                                role = Role.ASSISTANT,
-                                content = Content(contentPart),
-                            )
-                        }
-
-                        buffer.append(c.message.content ?: "")
-                        val tmp = buffer.toString()
-                        if (tmp.contains(toolCallTag))
-                        {
-                            val parts = tmp.split(toolCallTag)
-                            parts.forEachIndexed()
-                            { i, part ->
-                                // 偶数部分是内容
-                                if (i % 2 == 0 && i != parts.size - 1)
-                                {
-                                    if (part.isNotEmpty())
-                                        putContent(part)
+                            choice.message.toolCalls.orEmpty().forEach { tool ->
+                                val index = tool.index
+                                require(index != null && index >= 0) { "Chat Completions 工具调用增量缺少有效 index" }
+                                require(tool.type == null || tool.type == "function") { "Chat Completions 返回了不支持的工具调用类型" }
+                                val pending = waitingTools.getOrPut((choice.index ?: 0) to index) { PendingChatToolCall() }
+                                tool.id?.let { id ->
+                                    require(id.isNotBlank() && (pending.id == null || pending.id == id)) {
+                                        "Chat Completions 工具调用增量 id 无效或不一致"
+                                    }
+                                    pending.id = id
                                 }
-                                // 奇数部分是toolCall
-                                else if (i % 2 == 1 && i != parts.size - 1)
-                                {
-                                    val index = Random.nextInt()
-                                    val matchName = toolNameRegex.find(part)
-                                    val matchArgs = toolArgsRegex.find(part)
-                                    val toolName = matchName?.value
-                                        ?.trim()
-                                        ?.removePrefix(toolCallNameTag)
-                                        ?.removeSuffix(toolCallNameTag)
-                                        ?.trim()
-                                        ?: ""
-                                    val toolArgs = matchArgs?.value
-                                        ?.trim()
-                                        ?.removePrefix(toolCallArgsTag)
-                                        ?.removeSuffix(toolCallArgsTag)
-                                        ?.trim()
-                                        ?: ""
-                                    println("Parsed tool call: name='$toolName', args='$toolArgs'")
-                                    waitingTools[index] = toolName to toolArgs
-                                }
-                                // 最后一部分可能是不完整的内容，保留在buffer中
-                                else
-                                {
-                                    buffer.clear()
-                                    if (parts.size % 2 == 0) buffer.append(toolCallTag)
-                                    buffer.append(part)
+                                tool.function?.name?.let { pending.name.append(it) }
+                                tool.function?.arguments?.let { arguments ->
+                                    pending.arguments.append(arguments)
+                                    pending.hasArguments = true
                                 }
                             }
-                            return@forEach
+                            checkChatFinishReason(choice.finishReason)
                         }
-
-                        // 检查结尾是否出现toolCallTag的部分，即可能有未完成的toolCallTag
-                        for (len in toolCallTag.length - 1 downTo 1)
-                        {
-                            if (tmp.endsWith(toolCallTag.take(len)))
-                            {
-                                val completePart = tmp.dropLast(len)
-                                if (completePart.isNotEmpty())
-                                    putContent(completePart)
-                                buffer.clear()
-                                buffer.append(toolCallTag.take(len))
-                                return@forEach
-                            }
-                        }
-                        // 未出现toolCallTag并且不可能出现，全部作为内容
-                        putContent(tmp)
-                        buffer.clear()
                     }
+                    emit(Unit)
+                    true
                 }
+            }.collect { }
         }
-
-        waitingTools.onEachIndexed()
-        { i, it ->
-            curMsg += ChatMessage(
-                role = Role.ASSISTANT,
-                content = Content(),
-                toolCalls = listOf(ChatMessage.ToolCall("call-$loopId-$i", it.value.first, it.value.second)),
+        if (!done) throw UnknownAiResponseException(message = "Chat Completions 数据流缺少 [DONE]，响应可能已中断")
+        val calls = validatedChatToolCalls(waitingTools.entries.sortedWith(compareBy({ it.key.first }, { it.key.second })).map { (_, pending) ->
+            AiResponse.Choice.Message.ToolCall(
+                id = pending.id,
+                function = AiResponse.Choice.Message.ToolCall.Function(
+                    name = pending.name.toString(),
+                    arguments = pending.arguments.toString().takeIf { pending.hasArguments },
+                ),
             )
-        }
-    }.let()
-    {
-        val e = it.exceptionOrNull() ?: return@let it
-        if (e is SSEClientException)
-        {
-            val response = e.response ?: return@let it
-            if (!response.status.isSuccess())
-                return@let Result.failure(Exception("AI请求返回异常，HTTP状态码 ${response.status.value}, 响应体: ${response.bodyAsText()}"))
-        }
-        it
+        })
+        message = message.copy(toolCalls = calls.map { (id, call) -> ChatMessage.ToolCall(id, call.first, call.second) })
+        RequestResult(calls, message, usage, null)
     }
-
-    return RequestResult(
-        waitingTools.values.mapIndexed { i, it -> "call-$loopId-$i" to it }.toMap(),
-        curMsg,
-        usage = usage0,
-        r.exceptionOrNull() ?: if (done) null else UnknownAiResponseException(message = "AI请求未能正确完成，可能由于网络问题导致响应中断")
-    )
+    catch (error: Throwable)
+    {
+        RequestResult(emptyMap(), message, usage, error)
+    }
 }
 
 private suspend fun parseToolCalls(
@@ -737,12 +629,8 @@ private suspend fun parseToolCalls(
     onReceive: suspend (StreamAiResponseSlice) -> Unit,
 ): ChatMessages
 {
-    return waitingTools.map()
-    {
-        val (id, t) = it
-        if (id.isEmpty()) Uuid.random().toHexString() to t
-        else id to t
-    }.flatMap()
+    require(waitingTools.keys.all { it.isNotBlank() }) { "工具调用必须包含有效 id" }
+    return waitingTools.flatMap()
     { (id, t) ->
         val (toolName, parm) = t
         val tool = tools.firstOrNull { it.name == toolName } ?: return@flatMap run()

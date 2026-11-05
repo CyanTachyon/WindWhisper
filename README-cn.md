@@ -4,7 +4,7 @@
 ## 简要功能说明
 
 - 支持所有使用Discourse论坛系统的网站
-- 支持任意OpenAI API兼容的模型
+- 支持具备原生函数调用能力的OpenAI API兼容模型
 - AI可以阅读论坛中的帖子，并回复、点赞。同时在不同的帖子间保持记忆连续性。
 - 每当收到一个notification时，如果该notification与某一topic相关，AI会自动处理该topic。
 - [可选]让AI可以联网搜索、读取url内容等
@@ -26,7 +26,7 @@ gradle build
 
 ### 步骤2：准备工作
 1. 在目标论坛注册一个账户，并记下用户名和密码。
-2. 选择一个OpenAI API兼容的模型，并获取API Key。
+2. 选择兼容OpenAI API且支持原生函数调用的模型和服务商，并获取API Key。
 3. 该项目网络搜索工具依赖[tavily](https://tavily.com)，如果你想让AI可以进行网络，需注册一个tavily账户并获取API Key。该步骤可选。
 
 ### 步骤3：初始化
@@ -72,7 +72,6 @@ model:
   url: "https://your.openai.api/endpoint/v1/chat/completions" # 注意需要完整URL，即包含/v1/chat/completions
   key: ["your openai_api_key"] # 如果填写多个，将每次随机选择一个使用。
   model: "gpt-4" # 选择你想使用的模型
-  toolable: true # 是否支持工具调用，目前必须为true
   imageable: false # 是否支持视觉能力，目前该功能未实现
   customRequestParms: # 可选，自定义体字段
     temperature: 0.7
