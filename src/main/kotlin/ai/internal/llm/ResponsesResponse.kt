@@ -113,7 +113,9 @@ internal fun parseResponsesResponse(response: JsonObject): RequestResult
         formatError != null -> UnknownAiResponseException(message = "Responses API 响应格式无效: $formatError")
         response["output"] !is JsonArray || output.size != (response["output"] as JsonArray).size ->
             UnknownAiResponseException(message = "Responses API 响应格式无效: output 必须是对象数组")
-        text.isBlank() && calls.isEmpty() && images.isEmpty() && !hasCompaction -> UnknownAiResponseException(message =
+        // A completed turn may end silently after its tools have done the work.
+        text.isBlank() && calls.isEmpty() && images.isEmpty() && !hasCompaction &&
+            output.any { it.string("type") !in setOf("message", "reasoning") } -> UnknownAiResponseException(message =
             "Responses API 未返回可用的文本、函数调用、图像或压缩项")
         else -> null
     }

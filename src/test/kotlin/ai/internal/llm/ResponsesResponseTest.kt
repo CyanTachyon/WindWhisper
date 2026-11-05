@@ -313,7 +313,6 @@ class ResponsesResponseTest
             response("""{"type":"function_call","id":"fc_wrong_id","name":"lookup","arguments":"{}"}"""),
             response("${call("same")},${call("same")}"),
             response("""{"type":"image_generation_call","result":"base64"}"""),
-            response("""{"type":"reasoning","summary":[],"encrypted_content":"cipher"}"""),
             response("""{"type":"unknown_output","id":"unknown_1"}"""),
             json("""{"status":"completed","output":"invalid"}"""),
         )
@@ -321,6 +320,20 @@ class ResponsesResponseTest
             val result = parseResponsesResponse(response)
             assertNotNull(result.error, response.toString())
             assertTrue(result.toolCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `completed turns can finish without visible text`()
+    {
+        for (output in listOf("", message(""), """{"type":"message","content":[]}""",
+            """{"type":"reasoning","summary":[],"encrypted_content":"cipher"}"""))
+        {
+            val result = parseResponsesResponse(response(output))
+            assertNull(result.error, output)
+            assertTrue(result.toolCalls.isEmpty())
+            assertTrue(result.generatedImages.isEmpty())
+            assertTrue(result.message.content.toText().isEmpty())
         }
     }
 
