@@ -252,7 +252,7 @@ private suspend fun work(
                 when (result)
                 {
                     is AiResult.Success -> {
-                        logger.info("Completed $turnId in the Responses conversation")
+                        logger.fine("Completed $turnId in the Responses conversation")
                         true
                     }
                     is AiResult.UnknownError -> {
@@ -270,7 +270,7 @@ private suspend fun work(
                     if (success)
                     {
                         session.acknowledge("notification:$notificationId")
-                        logger.info("Marked notification $notificationId as read")
+                        logger.fine("Marked notification $notificationId as read")
                     }
                     else logger.warning("Notification $notificationId is complete, but marking it as read failed; only acknowledgement will be retried")
                 }

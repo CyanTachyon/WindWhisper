@@ -100,6 +100,8 @@ model:
 
 Edit `prompt.txt` to customize the bot's personality and standing instructions. These instructions are sent with each API request; notification details arrive separately as user messages.
 
+Routine request start, response creation/completion, notification completion, and read acknowledgements use `FINE` logging and are hidden at the default `INFO` level. Use `logger level FINE` in the console for diagnostics. Long waits, retries, and notification summaries remain visible. A successful response containing a `compaction` item produces an `INFO` entry, `Responses API context compaction result received`, without encrypted contents or guessed before/after token counts. Recovery GETs may confirm the same response's compaction result again.
+
 ### Continuous conversation and migration
 
 This branch sends `store: true`, continues with `previous_response_id`, and enables `context_management` compaction. It does not use a separate Conversations API object or resend the whole conversation history. See the official [conversation state](https://developers.openai.com/api/docs/guides/conversation-state) and [compaction](https://developers.openai.com/api/docs/guides/compaction) documentation.

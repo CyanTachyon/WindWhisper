@@ -109,22 +109,22 @@ suspend fun sendAiRequest(
                     val pendingId = session.state.turn!!.responseId
                     val requestDescription = "${if (pendingId != null) "GET" else "POST"} " +
                         "turn=${safeLogValue(turnId)} attempt=${attempt + 1}/${aiConfig.retry} model=${safeLogValue(model.model)}"
-                    logger.info("Responses API request started: $requestDescription")
+                    logger.fine("Responses API request started: $requestDescription")
                     val received = withResponsesWaitingLog(requestDescription) {
                         if (pendingId != null) retrieveResponse(model, pendingId)
                         else sendResponsesRequest(model.url, model.key.first(), body, stream, onReceive) { id ->
                             session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = id)))
-                            logger.info("Responses API response created: $requestDescription response=${safeLogValue(id)}")
+                            logger.fine("Responses API response created: $requestDescription response=${safeLogValue(id)}")
                         }
                     }
                     if (received.error is CancellationException)
                     {
-                        logger.info("Responses API request cancelled: $requestDescription")
+                        logger.fine("Responses API request cancelled: $requestDescription")
                         throw received.error!!
                     }
                     if (received.error == null)
                     {
-                        logger.info("Responses API request completed: $requestDescription response=${safeLogValue(received.responseId.orEmpty())}")
+                        logger.fine("Responses API request completed: $requestDescription response=${safeLogValue(received.responseId.orEmpty())}")
                         result = received
                         break
                     }
@@ -153,6 +153,9 @@ suspend fun sendAiRequest(
                 check(pendingId == null || pendingId == responseId) { "Responses API returned an unexpected response id" }
                 session.update(session.state.copy(turn = session.state.turn!!.copy(responseId = responseId)))
                 usage += completed.usage
+                val compactionItems = completed.message.responsesOutput.count { it["type"] == JsonPrimitive("compaction") }
+                if (compactionItems > 0)
+                    logger.info("Responses API context compaction result received: items=$compactionItems")
                 if (!completed.message.isBlank()) res += completed.message
 
                 for (image in completed.generatedImages)

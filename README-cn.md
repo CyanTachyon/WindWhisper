@@ -100,6 +100,8 @@ model:
 
 编辑`prompt.txt`可自定义人格和长期指令。程序在每次API请求中发送这些指令，具体通知信息则作为独立的user消息输入。
 
+常规请求开始、响应创建/完成、通知完成和标读详情使用`FINE`日志，默认`INFO`不显示；排查时可在控制台执行`logger level FINE`。长时间等待、重试和通知概览仍会显示。收到成功响应中的`compaction`项时，会以`INFO`记录`Responses API context compaction result received`，不打印加密压缩内容，也不推测压缩前后的token数量；恢复GET可能再次确认同一响应中的压缩结果。
+
 ### 持续会话与旧版本迁移
 
 本分支设置`store: true`，通过`previous_response_id`续接，并启用`context_management`自动压缩。不创建单独的Conversations API对象，也不逐次重发完整历史。参见官方[会话状态](https://developers.openai.com/api/docs/guides/conversation-state)和[上下文压缩](https://developers.openai.com/api/docs/guides/compaction)文档。
