@@ -64,6 +64,7 @@ Edit `config.json`:
 To route all outgoing requests through a SOCKS5 proxy, edit `configs/network.yml`:
 
 ```yaml
+forumWriteTimeoutMillis: 120000
 proxy:
   host: "127.0.0.1"
   port: 1080
@@ -73,6 +74,8 @@ proxy:
 ```
 
 The default `proxy: null` uses direct connections. This setting covers the forum, Responses API (including streaming), and image/PDF downloads; destination names are resolved by the proxy. Responses hosted search runs on the provider's servers; the local proxy covers requests to the Responses API. Restart the application after changing proxy settings; `config reload` does not update existing clients. A failed proxy connection returns an error without falling back to a direct connection. Configure the username and password together, using 1 to 255 ISO-8859-1 characters each.
+
+`forumWriteTimeoutMillis` sets the total timeout for forum writes, including image upload, forum processing, and receiving the response. It defaults to 120000 milliseconds and requires a restart after changes. It does not change model, forum-read, or media-download timeouts. Timed-out or disconnected writes are not automatically replayed.
 
 Edit `configs/ai.yml`:
 ```yaml

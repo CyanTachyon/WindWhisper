@@ -16,18 +16,25 @@ import kotlinx.serialization.json.jsonPrimitive
 import moe.tachyon.windwhisper.mainConfig
 import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.ai.UncertainToolExecutionException
+import moe.tachyon.windwhisper.config.networkConfig
 import moe.tachyon.windwhisper.utils.httpClient
 import moe.tachyon.windwhisper.utils.ktorClientEngineFactory
 import java.util.concurrent.TimeUnit
 
 // A lost response cannot tell us whether the forum accepted a write. Disable the HTTP
 // engine's own replay as well as application retries for these non-idempotent requests.
-private val forumWriteClient: HttpClient by lazy {
-    HttpClient(ktorClientEngineFactory) {
+private val forumWriteTimeoutMillis by lazy { networkConfig.forumWriteTimeoutMillis }
+private val forumWriteClient: HttpClient by lazy { createForumWriteClient(forumWriteTimeoutMillis) }
+
+internal fun createForumWriteClient(timeoutMillis: Long): HttpClient
+{
+    require(timeoutMillis in 1..Int.MAX_VALUE.toLong()) { "Invalid forum write timeout" }
+    return HttpClient(ktorClientEngineFactory) {
         engine {
             dispatcher = Dispatchers.IO
             config {
-                callTimeout(10_000, TimeUnit.MILLISECONDS)
+                // Synchronous uploads include the forum's image processing, not just transfer.
+                callTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
                 retryOnConnectionFailure(false)
             }
         }
@@ -99,7 +106,7 @@ data class LoginData(
             {
                 if (error is CancellationException) throw error
                 if (!readOnly) throw UncertainToolExecutionException(
-                    "论坛写请求的结果未知，请核对论坛后恢复；不会自动重试该操作。", error)
+                    "论坛写请求 ${Url(url).encodedPath} 失败（总超时限制 ${forumWriteTimeoutMillis} ms），执行结果未知。", error)
                 if (time == mainConfig.retry - 1)
                     throw error
             }

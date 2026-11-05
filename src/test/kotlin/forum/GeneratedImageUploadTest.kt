@@ -1,6 +1,7 @@
 package moe.tachyon.windwhisper.forum
 
 import com.sun.net.httpserver.HttpServer
+import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.CancellationException
@@ -19,10 +20,13 @@ import moe.tachyon.windwhisper.mainConfig
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
 import kotlin.test.*
 
@@ -279,6 +283,41 @@ class GeneratedImageUploadTest
     }
 
     @Test
+    fun `forum writes can wait beyond the old ten second deadline without being replayed`() = runBlocking {
+        MockForum { Reply("{\"accepted\":true}", delayMillis = 10_300) }.use { server ->
+            configure(server)
+            val user = LoginData("forum-session=fixture", "csrf-fixture")
+            val response = withTimeout(20_000) {
+                user.post("${server.url}/write") { setBody("one write") }.bodyAsText()
+            }
+            assertEquals("{\"accepted\":true}", response)
+            assertEquals(1, server.requests.size)
+            assertEquals("POST", server.requests.single().method)
+            assertEquals("one write", server.requests.single().body.toString(Charsets.UTF_8))
+            server.verify()
+        }
+    }
+
+    @Test
+    fun `configured write deadline still expires without replaying an accepted request`() = runBlocking {
+        MockForum { Reply("{}", delayMillis = 1_500, allowClientDisconnect = true) }.use { server ->
+            createForumWriteClient(500).use { client ->
+                val error = assertFailsWith<IOException> {
+                    withTimeout(5_000) {
+                        client.post("${server.url}/write") { setBody("one write") }.bodyAsText()
+                    }
+                }
+                assertTrue("timeout" in error.message.orEmpty(), error.toString())
+            }
+            server.awaitFirstResponse()
+            assertEquals(1, server.requests.size)
+            assertEquals("POST", server.requests.single().method)
+            assertEquals("one write", server.requests.single().body.toString(Charsets.UTF_8))
+            server.verify()
+        }
+    }
+
+    @Test
     fun `uncertain POST and PUT failures are never retried`() = runBlocking {
         MockForum { Reply(disconnect = true) }.use { server ->
             configure(server)
@@ -377,19 +416,30 @@ class GeneratedImageUploadTest
         fun header(name: String): String? = headers.entries.firstOrNull { it.key.equals(name, true) }?.value?.firstOrNull()
     }
 
-    private data class Reply(val body: String = "", val status: Int = 200, val headers: Map<String, String> = emptyMap(), val disconnect: Boolean = false)
+    private data class Reply(
+        val body: String = "",
+        val status: Int = 200,
+        val headers: Map<String, String> = emptyMap(),
+        val disconnect: Boolean = false,
+        val delayMillis: Long = 0,
+        val allowClientDisconnect: Boolean = false,
+    )
 
     private class MockForum(handler: (Request) -> Reply): AutoCloseable
     {
         val requests = CopyOnWriteArrayList<Request>()
         private val failures = CopyOnWriteArrayList<Throwable>()
+        private val firstResponse = CountDownLatch(1)
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
+                var allowClientDisconnect = false
                 try
                 {
                     val request = Request(exchange.requestMethod, exchange.requestURI.path, exchange.requestHeaders.toMap(), exchange.requestBody.readBytes())
                     requests += request
                     val response = handler(request)
+                    allowClientDisconnect = response.allowClientDisconnect
+                    if (response.delayMillis > 0) Thread.sleep(response.delayMillis)
                     if (!response.disconnect)
                     {
                         exchange.responseHeaders.add("Content-Type", "application/json")
@@ -399,12 +449,20 @@ class GeneratedImageUploadTest
                         exchange.responseBody.write(bytes)
                     }
                 }
-                catch (error: Throwable) { failures += error }
-                finally { exchange.close() }
+                catch (error: Throwable)
+                {
+                    if (!(allowClientDisconnect && error is IOException)) failures += error
+                }
+                finally
+                {
+                    exchange.close()
+                    firstResponse.countDown()
+                }
             }
             start()
         }
         val url: String get() = "http://127.0.0.1:${server.address.port}"
+        fun awaitFirstResponse() { assertTrue(firstResponse.await(5, TimeUnit.SECONDS), "Mock forum did not finish its response") }
         fun verify() { failures.firstOrNull()?.let { throw AssertionError("Mock forum failed", it) } }
         override fun close() { server.stop(0) }
     }

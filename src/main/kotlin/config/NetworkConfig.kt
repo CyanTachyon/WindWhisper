@@ -7,7 +7,17 @@ import kotlinx.serialization.Serializable
 data class NetworkConfig(
     @YamlComment("全局SOCKS5代理，null为直连；修改后需重启，config reload不会更新现有连接")
     val proxy: Socks5Proxy? = null,
+    @YamlComment("论坛写请求总超时（毫秒），包含图片上传与服务端处理；修改后需重启")
+    val forumWriteTimeoutMillis: Long = 120_000,
 )
+{
+    init
+    {
+        require(forumWriteTimeoutMillis in 1..Int.MAX_VALUE.toLong()) {
+            "forumWriteTimeoutMillis must be between 1 and ${Int.MAX_VALUE}"
+        }
+    }
+}
 
 @Serializable
 data class Socks5Proxy(
