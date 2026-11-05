@@ -132,4 +132,62 @@ class ResponsesRequestTest
         }
     }
 
+    @Test
+    fun `search selection adds hosted search only for responses and preserves functions`()
+    {
+        for (search in AiConfig.Search.entries)
+        {
+            val context = context(context().model.copy(search = search)).apply {
+                tools = listOf(AiToolInfo("read_post", "Read a post", null,
+                    { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) },
+                    JsonSchema.Object(), typeOf<String>()))
+            }
+            val body = buildResponsesRequest(context, ChatMessages(Role.USER, "Find sources"), true)
+            val tools = body["tools"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(1, tools.count { it["name"] == JsonPrimitive("read_post") })
+            assertEquals(if (search == AiConfig.Search.RESPONSES) 1 else 0,
+                tools.count { it["type"] == JsonPrimitive("web_search") })
+        }
+        val hostedOnly = context(context().model.copy(search = AiConfig.Search.RESPONSES))
+        val body = buildResponsesRequest(hostedOnly, ChatMessages(Role.USER, "Search"), false)
+        assertEquals(JsonPrimitive("web_search"), body["tools"]!!.jsonArray.single().jsonObject["type"])
+        val disabled = buildResponsesRequest(context(context().model.copy(search = AiConfig.Search.NONE)), ChatMessages.empty(), false)
+        assertFalse("tools" in disabled)
+    }
+
+    @Test
+    fun `custom tools cannot replace forum tools or override search selection`()
+    {
+        val custom = Yaml.default.parseToYamlNode("""
+            tools:
+              - type: web_search
+                search_context_size: low
+              - type: web_search
+              - type: file_search
+                vector_store_ids: [vs_test]
+              - type: mcp
+                server_label: first
+                server_url: https://first.example.com/mcp
+              - type: mcp
+                server_label: second
+                server_url: https://second.example.com/mcp
+        """.trimIndent()) as YamlMap
+        for (search in AiConfig.Search.entries)
+        {
+            val context = context(context().model.copy(search = search, customRequestParms = custom)).apply {
+                tools = listOf(AiToolInfo("read_post", "Read a post", null,
+                    { _: String, _ -> AiToolInfo.ToolResult(Content("unused")) },
+                    JsonSchema.Object(), typeOf<String>()))
+            }
+            val tools = buildResponsesRequest(context, ChatMessages.empty(), false)["tools"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(1, tools.count { it["name"] == JsonPrimitive("read_post") })
+            assertEquals(1, tools.count { it["type"] == JsonPrimitive("file_search") })
+            assertEquals(listOf("first", "second"), tools.filter { it["type"] == JsonPrimitive("mcp") }
+                .map { it["server_label"]!!.jsonPrimitive.content })
+            val hosted = tools.filter { it.isResponsesWebSearchTool() }
+            if (search == AiConfig.Search.RESPONSES)
+                assertEquals(JsonPrimitive("low"), hosted.single()["search_context_size"])
+            else assertTrue(hosted.isEmpty())
+        }
+    }
 }

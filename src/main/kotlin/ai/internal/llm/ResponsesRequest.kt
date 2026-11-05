@@ -5,6 +5,7 @@ import moe.tachyon.windwhisper.ai.ChatMessages
 import moe.tachyon.windwhisper.ai.Content
 import moe.tachyon.windwhisper.ai.ContentNode
 import moe.tachyon.windwhisper.ai.Role
+import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.contentNegotiationJson
 import moe.tachyon.windwhisper.utils.toJsonElement
 
@@ -57,9 +58,15 @@ internal fun buildResponsesRequest(
         }
         it.map { tool -> tool.jsonObject }
     }.orEmpty()
-    // Extra tools must not replace the application's forum functions.
+    // Extra tools must not replace the application's forum functions. The search selector owns
+    // hosted web search, including when a custom tool supplies additional search options.
     val tools = ((request["tools"] as? JsonArray).orEmpty().map { it.jsonObject } + customTools)
+        .filterNot { it.isResponsesWebSearchTool() }
         .distinctBy { tool -> if (tool["type"] == JsonPrimitive("function")) tool["name"] ?: tool else tool }
+        .toMutableList()
+    if (context.model.search == AiConfig.Search.RESPONSES)
+        tools += customTools.firstOrNull { it.isResponsesWebSearchTool() }
+            ?: buildJsonObject { put("type", "web_search") }
     val merged = (request + custom).toMutableMap()
     if (tools.isEmpty()) merged.remove("tools") else merged["tools"] = JsonArray(tools)
     val includes = (merged["include"] as? JsonArray).orEmpty() + JsonPrimitive("reasoning.encrypted_content")

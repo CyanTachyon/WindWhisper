@@ -28,6 +28,19 @@ data class AiConfig(
     }
 
     @Serializable
+    enum class Search
+    {
+        @SerialName("tavily")
+        TAVILY,
+
+        @SerialName("responses")
+        RESPONSES,
+
+        @SerialName("none")
+        NONE,
+    }
+
+    @Serializable
     data class LlmModel(
         val url: String = "https://api.deepseek.com/chat/completions",
         val model: String = "deepseek-reasoner",
@@ -41,6 +54,8 @@ data class AiConfig(
         val customRequestParms: YamlMap? = null,
         @YamlComment("API协议：chat_completions（默认）或responses；url需填写对应接口的完整地址")
         val apiType: ApiType = ApiType.CHAT_COMPLETIONS,
+        @YamlComment("联网搜索：tavily（默认，使用webSearchKey）、responses（服务端搜索，仅限Responses API）或none（关闭）")
+        val search: Search = Search.TAVILY,
     )
     {
         val semaphore by lazy { Semaphore(maxConcurrency) }
@@ -49,6 +64,9 @@ data class AiConfig(
         {
             require(maxConcurrency > 0) { "maxConcurrency must be greater than 0" }
             require(key.isNotEmpty()) { "chat key must not be empty" }
+            require(search != Search.RESPONSES || apiType == ApiType.RESPONSES) {
+                "search: responses requires apiType: responses"
+            }
         }
     }
 

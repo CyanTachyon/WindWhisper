@@ -27,7 +27,7 @@ gradle build
 ### 步骤2：准备工作
 1. 在目标论坛注册一个账户，并记下用户名和密码。
 2. 选择兼容OpenAI API且支持原生函数调用的模型和服务商，并获取API Key。
-3. 默认的联网搜索工具使用[Tavily](https://tavily.com)；如需启用这些工具，需注册Tavily账户并获取API Key。该步骤可选。
+3. 按需选择联网搜索方式。Tavily搜索需要注册[tavily](https://tavily.com)账户并获取API Key；Responses内置搜索由模型服务商执行，无需Tavily密钥。也可以关闭联网搜索。
 
 ### 步骤3：初始化
 使用以下命令启动WindWhisper：
@@ -66,10 +66,11 @@ timeout: 120000
 retry: 3
 webSearchKey:
   [
-    "your_tavily_api_key" # 可选，留空则不启用网络搜索功能
+    "your_tavily_api_key" # 可选，设置webSearchKey: []可关闭Tavily工具
   ]
 model:
   apiType: chat_completions # 可选，现有配置默认使用此协议
+  search: tavily # tavily、responses或none
   url: "https://your.openai.api/endpoint/v1/chat/completions" # 注意需要完整URL，即包含/v1/chat/completions
   key: ["your openai_api_key"] # 如果填写多个，将每次随机选择一个使用。
   model: "gpt-4" # 选择你想使用的模型
@@ -86,6 +87,7 @@ model:
 ```yaml
 model:
   apiType: responses
+  search: responses
   url: "https://api.openai.com/v1/responses"
   key: ["your_openai_api_key"]
   model: "gpt-6-astra" # 使用你的API账户可访问的模型
@@ -96,6 +98,16 @@ model:
 ```
 
 每个模型可以独立选择协议；可选的`vlmModel`使用相同配置字段，并且必须设置`visible: true`。不填写`apiType`的旧配置继续使用Chat Completions。`url`必须填写对应协议的完整接口地址，修改`apiType`不会自动改写URL。
+
+通过`model.search`选择联网搜索方式：
+
+| 值 | 行为 | 要求 |
+| --- | --- | --- |
+| `tavily` | 注册Tavily搜索、提取网页和抓取工具。 | 顶层`webSearchKey`列表中至少有一个密钥；两种API协议均可使用。 |
+| `responses` | 启用Responses API内置联网搜索，不注册Tavily工具。 | 设置`apiType: responses`，且模型和服务商支持内置联网搜索；无需Tavily密钥。 |
+| `none` | 关闭Tavily搜索、提取网页和抓取工具，以及内置联网搜索。 | 无。 |
+
+省略`model.search`时为主模型保留原来的Tavily工具；`webSearchKey: []`会关闭这些工具。请通过该字段选择内置搜索，不要使用`customRequestParms.tools`配置。内置搜索的引用会以Markdown链接形式显示。启用内置搜索时，回答正文在响应完成后统一显示，以便包含引用；如果API提供推理摘要，摘要仍会流式显示。
 
 OpenAI仍然支持Chat Completions。GPT-6 Astra的工具调用要求使用Responses，因此本项目调用论坛工具时需选择Responses。详见官方[Responses迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)和[GPT-6指南](https://developers.openai.com/api/docs/guides/latest-model)。
 
@@ -125,6 +137,6 @@ java -jar WindWhisper.jar
 
 WindWhisper重复执行以下步骤：
 1. 检查论坛的notification。如果有新的notification，且其关联topic，执行以下步骤。
-2. 将提示词、记忆、待处理的topicID作为提示词给AI，同时为AI提供获得topic、获得posts、点赞、回复以及联网搜索相关工具（如果配置了tavily API Key）。
+2. 将提示词、记忆、待处理的topicID作为提示词给AI，同时提供获得topic、获得posts、点赞、回复工具，以及`model.search`所选择的联网搜索方式。
 3. AI将通过工具读取帖子，并进行互动。
 4. 互动结束后，AI需输出新的记忆内容，程序将保存到`data/memory.md`中。

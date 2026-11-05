@@ -27,7 +27,7 @@ After compilation completes, the `WindWhisper.jar` file will be generated in the
 ### Step 2: Preparation
 1. Register an account on the target forum and note down the username and password.
 2. Choose an OpenAI API-compatible model and provider that support native function calling, then obtain an API Key.
-3. The default web search tools use [Tavily](https://tavily.com). To enable them, register a Tavily account and obtain an API key. This step is optional.
+3. Choose a web search provider if needed. Tavily search requires a [Tavily](https://tavily.com) API Key; Responses hosted search uses your model provider and needs no Tavily key. Search can also be disabled.
 
 ### Step 3: Initialization
 Start WindWhisper using the following command:
@@ -66,10 +66,11 @@ timeout: 120000
 retry: 3
 webSearchKey:
   [
-    "your_tavily_api_key" # Optional, leave empty to disable web search functionality
+    "your_tavily_api_key" # Optional; use webSearchKey: [] to disable Tavily tools
   ]
 model:
   apiType: chat_completions # Optional; this is the default for existing configurations
+  search: tavily # tavily, responses, or none
   url: "https://your.openai.api/endpoint/v1/chat/completions" # Note: full URL is required, including /v1/chat/completions
   key: ["your openai_api_key"] # If multiple keys are provided, one will be randomly selected for each use.
   model: "gpt-4" # Choose the model you want to use
@@ -86,6 +87,7 @@ To use OpenAI Responses API, replace the `model` section with:
 ```yaml
 model:
   apiType: responses
+  search: responses
   url: "https://api.openai.com/v1/responses"
   key: ["your_openai_api_key"]
   model: "gpt-6-astra" # Use a model available to your API account
@@ -96,6 +98,16 @@ model:
 ```
 
 Choose the protocol separately for each model: the optional `vlmModel` section accepts the same fields and must have `visible: true`. Existing configurations without `apiType` continue to use Chat Completions. Always supply the complete URL for the selected protocol; changing `apiType` does not rewrite the URL.
+
+Select web search with `model.search`:
+
+| Value | Behavior | Requirements |
+| --- | --- | --- |
+| `tavily` | Registers the Tavily search, extract, and crawl tools. | At least one key in the existing top-level `webSearchKey` list. Works with either API protocol. |
+| `responses` | Enables the Responses API's hosted web search, without registering Tavily tools. | `apiType: responses` and a model/provider supporting hosted web search. No Tavily key needed. |
+| `none` | Disables Tavily search, extract, and crawl tools, and hosted web search. | None. |
+
+Omitting `model.search` preserves Tavily tools for the main model; an empty `webSearchKey: []` disables those tools. Select hosted search through this field, not `customRequestParms.tools`. Hosted search citations are rendered as Markdown links. When hosted search is enabled, answer text is displayed after the response completes so citations can be included; reasoning summaries still stream when provided by the API.
 
 Chat Completions remains supported by OpenAI. GPT-6 Astra's tool calling requires Responses, which is needed for this bot's forum tools. See the official [Responses migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) and [GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model).
 
@@ -123,6 +135,6 @@ The program should connect to the forum and start working. You can see log outpu
 
 WindWhisper repeats the following steps:
 1. Check the forum's notifications. If there is a new notification and it is associated with a topic, execute the following steps.
-2. Provide the AI with the prompt, memory, and the pending topicID as part of the prompt. Also provide the AI with tools to get the topic, get posts, like, reply, and perform web searches (if a tavily API Key is configured).
+2. Provide the AI with the prompt, memory, and the pending topicID as part of the prompt. Also provide tools to get the topic, get posts, like, reply, and the web search provider selected by `model.search`.
 3. The AI will read the posts through the tools and interact.
 4. After the interaction ends, the AI needs to output new memory content, which the program will save to `data/memory.md`.

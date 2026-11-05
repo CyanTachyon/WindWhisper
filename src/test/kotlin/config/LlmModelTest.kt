@@ -4,6 +4,7 @@ import kotlinx.serialization.decodeFromString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertTrue
 
 class LlmModelTest
 {
@@ -20,6 +21,7 @@ class LlmModelTest
         """.trimIndent())
 
         assertEquals(AiConfig.ApiType.CHAT_COMPLETIONS, config.model.apiType)
+        assertEquals(AiConfig.Search.TAVILY, config.model.search)
         assertEquals("https://api.deepseek.com/chat/completions", config.model.url)
     }
 
@@ -93,4 +95,78 @@ class LlmModelTest
         }
     }
 
+    @Test
+    fun allSearchProvidersDecodeFromYaml()
+    {
+        for ((name, expected) in mapOf(
+            "tavily" to AiConfig.Search.TAVILY,
+            "responses" to AiConfig.Search.RESPONSES,
+            "none" to AiConfig.Search.NONE,
+        ))
+        {
+            val config = yaml.decodeFromString<AiConfig>("""
+                webSearchKey: []
+                model:
+                  apiType: responses
+                  search: $name
+            """.trimIndent())
+
+            assertEquals(expected, config.model.search)
+            assertTrue(config.webSearchKey.isEmpty())
+        }
+    }
+
+    @Test
+    fun mainAndVisionModelsCanChooseDifferentSearchProviders()
+    {
+        val config = yaml.decodeFromString<AiConfig>("""
+            model:
+              apiType: chat_completions
+              search: none
+            vlmModel:
+              apiType: responses
+              search: responses
+              visible: true
+        """.trimIndent())
+
+        assertEquals(AiConfig.Search.NONE, config.model.search)
+        assertEquals(AiConfig.Search.RESPONSES, config.vlmModel?.search)
+    }
+
+    @Test
+    fun omittedSearchPreservesTavilyForResponsesModels()
+    {
+        val config = yaml.decodeFromString<AiConfig>("""
+            model:
+              apiType: responses
+        """.trimIndent())
+
+        assertEquals(AiConfig.Search.TAVILY, config.model.search)
+    }
+
+    @Test
+    fun hostedSearchRejectsChatCompletionsProtocol()
+    {
+        for (protocol in listOf("", "apiType: chat_completions"))
+        {
+            assertFails {
+                yaml.decodeFromString<AiConfig>("""
+                    model:
+                      $protocol
+                      search: responses
+                """.trimIndent())
+            }
+        }
+    }
+
+    @Test
+    fun unknownSearchProviderIsRejected()
+    {
+        assertFails {
+            yaml.decodeFromString<AiConfig>("""
+                model:
+                  search: auto
+            """.trimIndent())
+        }
+    }
 }

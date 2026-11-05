@@ -130,6 +130,95 @@ class LlmTransportTest
     }
 
     @Test
+    fun `hosted web search coexists with local functions and preserves citations in both transports`() = runBlocking {
+        for (stream in listOf(false, true))
+        {
+            val calls = mutableListOf<String>()
+            val slices = mutableListOf<StreamAiResponseSlice>()
+            val sourceUrl = "https://example.com/facts"
+            val searchItem = buildJsonObject {
+                put("type", "web_search_call")
+                put("id", "ws_test")
+                put("status", "completed")
+                putJsonObject("action") {
+                    put("type", "search")
+                    putJsonArray("queries") { add("facts") }
+                }
+            }
+            val citation = buildJsonObject {
+                put("type", "url_citation")
+                put("url", sourceUrl)
+                put("title", "Example source")
+                put("start_index", 12)
+                put("end_index", 12)
+            }
+            val citedMessage = JsonObject(message("Found facts.") + ("content" to buildJsonArray {
+                add(buildJsonObject {
+                    put("type", "output_text")
+                    put("text", "Found facts.")
+                    put("annotations", JsonArray(listOf(citation)))
+                })
+            }))
+            val first = completed(listOf(searchItem, reasoning(), functionCall("a", "facts")))
+            val final = completed(listOf(citedMessage))
+            MockServer { index, request ->
+                val tools = request.body.getValue("tools").jsonArray.map { it.jsonObject }
+                assertEquals(2, tools.size)
+                assertEquals(1, tools.count { it["type"] == JsonPrimitive("web_search") })
+                assertEquals(listOf("echo"), tools.filter { it["type"] == JsonPrimitive("function") }
+                    .map { it.getValue("name").jsonPrimitive.content })
+                when (index)
+                {
+                    0 -> if (!stream) MockResponse(first) else MockResponse.sse(
+                        event("response.web_search_call.in_progress", "item_id" to JsonPrimitive("ws_test"), "output_index" to JsonPrimitive(0)),
+                        event("response.web_search_call.completed", "item_id" to JsonPrimitive("ws_test"), "output_index" to JsonPrimitive(0)),
+                        event("response.completed", "response" to first),
+                    )
+                    1 -> {
+                        val input = request.body.getValue("input").jsonArray.map { it.jsonObject }
+                        assertEquals(searchItem, input.single { it["type"] == JsonPrimitive("web_search_call") })
+                        val outputs = input.filter { it["type"] == JsonPrimitive("function_call_output") }
+                        assertEquals(1, outputs.size)
+                        assertEquals("call_a", outputs.single().getValue("call_id").jsonPrimitive.content)
+                        assertEquals("echo:facts", outputs.single().getValue("output").jsonPrimitive.content)
+                        assertEquals("call_a", input.single { it["type"] == JsonPrimitive("function_call") }
+                            .getValue("call_id").jsonPrimitive.content)
+                        if (!stream) MockResponse(final) else MockResponse.sse(
+                            delta("response.output_text.delta", "Found "),
+                            delta("response.output_text.delta", "facts."),
+                            event("response.output_text.annotation.added", "item_id" to JsonPrimitive("msg_test"),
+                                "output_index" to JsonPrimitive(0), "content_index" to JsonPrimitive(0),
+                                "annotation_index" to JsonPrimitive(0), "annotation" to citation),
+                            event("response.completed", "response" to final),
+                        )
+                    }
+                    else -> error("Unexpected request $index")
+                }
+            }.use { server ->
+                val result = withTimeout(10_000) {
+                    sendAiRequest(server.model().copy(search = AiConfig.Search.RESPONSES),
+                        ChatMessages(Role.USER, "Find facts and echo them"), tools = listOf(echoTool(calls)),
+                        stream = stream, onReceive = slices::add)
+                }
+                server.verify()
+                assertIs<AiResult.Success>(result, "stream=$stream")
+                assertEquals(listOf("facts"), calls)
+                assertEquals(2, server.requests.size)
+                assertEquals(listOf("echo"), slices.filterIsInstance<StreamAiResponseSlice.ToolCall>().map { it.tool.name })
+                assertEquals(first.getValue("output").jsonArray.toList(), result.messages.first().responsesOutput)
+                val last = result.messages.last()
+                assertEquals(listOf(citedMessage), last.responsesOutput)
+                val text = last.content.toText()
+                assertTrue(text.contains("Found facts."), "stream=$stream: $text")
+                assertTrue(text.contains(sourceUrl), "stream=$stream: $text")
+                assertEquals(2, text.split(sourceUrl).size, "Citation URL must appear once")
+                if (stream) assertEquals(text,
+                    slices.filterIsInstance<StreamAiResponseSlice.Message>().joinToString("") { it.content })
+            }
+        }
+    }
+
+    @Test
     fun `truncated stream retains partial text and never executes a pending tool`() = runBlocking {
         val calls = mutableListOf<String>()
         MockServer { _, _ -> MockResponse.sse(

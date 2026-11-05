@@ -18,6 +18,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
+import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.logger.WindWhisperLogger
 import moe.tachyon.windwhisper.ai.Content
@@ -170,6 +171,7 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
             description = """
                 进行网络搜索，将返回若干相关的搜索结果及来源url等，如有需要可以再使用`web_extract`工具提取网页内容
             """.trimIndent(),
+            condition = { _, model -> (model?.search ?: AiConfig.Search.TAVILY) == AiConfig.Search.TAVILY },
         )
         {
             val data = parm.key
@@ -196,6 +198,7 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
             description = """
                 提取网页内容，将读取指定url的内容并返回
             """.trimIndent(),
+            condition = { _, model -> (model?.search ?: AiConfig.Search.TAVILY) == AiConfig.Search.TAVILY },
         )
         {
             sendMessage("读取网页: [${parm.url}](${parm.url})")
@@ -235,6 +238,7 @@ object WebSearch: AiToolSet.ToolProvider<Any?>
                 爬取网页内容，将从指定url开始，按照指令爬取相关页面并返回
                 当你需要某个特定的站点中搜索内容时非常有用
             """.trimIndent(),
+            condition = { _, model -> (model?.search ?: AiConfig.Search.TAVILY) == AiConfig.Search.TAVILY },
         )
         {
             sendMessage("爬取网页: [${parm.url}](${parm.url})，指令: ${parm.query}，深度: ${parm.depth}")

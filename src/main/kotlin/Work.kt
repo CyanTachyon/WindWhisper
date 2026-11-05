@@ -12,6 +12,7 @@ import moe.tachyon.windwhisper.ai.tools.AiToolSet
 import moe.tachyon.windwhisper.ai.tools.Forum
 import moe.tachyon.windwhisper.ai.tools.ReadImage
 import moe.tachyon.windwhisper.ai.tools.WebSearch
+import moe.tachyon.windwhisper.config.AiConfig
 import moe.tachyon.windwhisper.config.aiConfig
 import moe.tachyon.windwhisper.console.AnsiColor
 import moe.tachyon.windwhisper.console.AnsiStyle
@@ -132,7 +133,8 @@ private suspend fun work(user: LoginData, prompt: String)
         Forum(user, blackList),
         ReadImage(vlm = aiConfig.vlmModel)
     )
-    if (aiConfig.webSearchKey.isNotEmpty()) tools.addProvider(WebSearch)
+    if (aiConfig.model.search == AiConfig.Search.TAVILY && aiConfig.webSearchKey.isNotEmpty())
+        tools.addProvider(WebSearch)
 
     val res = logger.warning("Failed to send AI request for posts $topics")
     {
