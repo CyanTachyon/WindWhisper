@@ -83,6 +83,7 @@ proxy:
 # 流式请求为无新事件的最长等待时间，包含等待响应头。
 # 只要持续收到事件，流式请求总时长可以超过此值。
 timeout: 120000
+notificationPollIntervalSeconds: 60
 model:
   url: "https://api.openai.com/v1/responses"
   model: "gpt-6-astra" # 使用你的API账户可访问的模型
@@ -96,6 +97,8 @@ model:
     reasoning:
       effort: low
 ```
+
+`notificationPollIntervalSeconds`设置首次抓取通知前、以及每轮通知处理结束后的等待秒数。旧配置未填写时默认为5秒，上例设为60秒。执行`config reload ai.yml`后，会在安排下一次等待时采用新值，不会打断已经安排的等待。
 
 `url`必须填写完整的Responses接口地址。`compactThreshold`是服务端自动压缩的token阈值，至少为1000，并应与模型上下文上限留出余量。`webSearch`和`imageGeneration`控制内置工具；`visible`控制是否向模型提供图片/PDF阅读工具。持续会话固定使用`key`列表中的第一个密钥，不会在各轮请求间随机切换。
 

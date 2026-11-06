@@ -83,6 +83,7 @@ Edit `configs/ai.yml`:
 # maximum time without a new event for streams, including waiting for response headers.
 # Active streams may run longer as long as events keep arriving.
 timeout: 120000
+notificationPollIntervalSeconds: 60
 model:
   url: "https://api.openai.com/v1/responses"
   model: "gpt-6-astra" # Use a model available to your account
@@ -96,6 +97,8 @@ model:
     reasoning:
       effort: low
 ```
+
+`notificationPollIntervalSeconds` controls the wait before the first notification poll and after each notification-processing round. It defaults to 5 seconds when omitted; the example above sets it to 60 seconds. `config reload ai.yml` applies changes when the next wait is scheduled; it does not interrupt an already scheduled wait.
 
 `url` must be the complete Responses endpoint. `compactThreshold` is the token threshold for server-side automatic compaction; it must be at least 1000 and should leave room below the model's context limit. `webSearch` and `imageGeneration` control the hosted tools. `visible` controls whether the bot exposes its image/PDF reading tool. The conversation consistently uses the first entry in `key`; it does not randomly switch credentials between turns.
 

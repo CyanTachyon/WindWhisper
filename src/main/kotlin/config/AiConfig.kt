@@ -12,6 +12,8 @@ data class AiConfig(
     val timeout: Long = 2 * 60 * 1_000,
     val model: LlmModel = LlmModel(),
     val speech: SpeechConfig = SpeechConfig(),
+    @YamlComment("通知轮询间隔（秒）：启动时及每轮处理结束后等待；reload 后从下一次安排等待开始生效")
+    val notificationPollIntervalSeconds: Int = 5,
 )
 {
     @Serializable
@@ -53,6 +55,7 @@ data class AiConfig(
     init
     {
         require(timeout > 0) { "timeout must be greater than 0" }
+        require(notificationPollIntervalSeconds > 0) { "notificationPollIntervalSeconds must be greater than 0" }
     }
 }
 

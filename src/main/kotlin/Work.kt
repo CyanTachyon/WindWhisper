@@ -32,7 +32,7 @@ suspend fun workMain(user: LoginData, prompt: String)
     val runtime = ConversationRuntime(user, instructions, session, images, scope)
     ConversationRuntime.attach(runtime)
     logger.info("Starting Responses notification loop...")
-    var nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+    var nextPoll = nextNotificationPoll()
     try
     {
         while (true)
@@ -45,7 +45,7 @@ suspend fun workMain(user: LoginData, prompt: String)
                 if (isConsoleTurn(pending))
                     processConsoleTurn(runtime, pending, ChatMessages.empty(), session.pendingDeliveryIds)
                 else work(user, instructions, session, images, scope)
-                nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                nextPoll = nextNotificationPoll()
                 continue
             }
 
@@ -56,7 +56,7 @@ suspend fun workMain(user: LoginData, prompt: String)
             if (System.nanoTime() >= nextPoll)
             {
                 work(user, instructions, session, images, scope)
-                nextPoll = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                nextPoll = nextNotificationPoll()
             }
         }
     }
@@ -67,6 +67,9 @@ suspend fun workMain(user: LoginData, prompt: String)
         if (abandoned > 0) logger.warning("Discarded $abandoned queued console messages during shutdown; they were not sent")
     }
 }
+
+private fun nextNotificationPoll(): Long =
+    System.nanoTime() + TimeUnit.SECONDS.toNanos(aiConfig.notificationPollIntervalSeconds.toLong())
 
 internal fun currentSessionScope(model: AiConfig.LlmModel): String =
     responsesSessionScope(mainConfig.url, mainConfig.username, model.url, model.key.first())
