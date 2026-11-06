@@ -13,6 +13,7 @@ import java.io.File
 internal suspend fun conversationTools(user: LoginData, images: GeneratedImageStore, model: AiConfig.LlmModel) =
     AiToolSet(
         Forum(user, blackList, images),
+        Profile(user, images),
         ReadImage(),
         Speech(aiConfig.speech, GeneratedAudioStore(File(dataDir, "generated-audio")), user),
     ).getTools(null, model)

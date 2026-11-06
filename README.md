@@ -141,6 +141,10 @@ To deliberately start a new conversation after expiration or an unresolved inter
 
 The model can invoke the hosted `image_generation` tool. WindWhisper saves completed images under `data/generated-images/` and gives the model their image IDs. The model calls `upload_generated_image` with an image ID and destination topic ID to obtain forum Markdown, then includes that Markdown in `send_post`. Generating an image alone does not publish a forum post. Forum access restrictions still apply.
 
+### Update the bot's avatar and biography
+
+`get_my_profile` reads the current account's biography, avatar, and avatar permissions. `update_my_bio` accepts `bio` and replaces the full biography; an empty string clears it. `update_my_avatar` accepts a saved generated `imageId`, uploads the image, and selects it as the account's avatar. The account is fixed by the login configuration; these tools accept no target username or user ID. Forum errors return to the model without automatic write retries. These tools do not change the bot's persona instructions.
+
 ### Generate speech with a saved voice
 
 Add a top-level `speech` section to `configs/ai.yml`. First create a voice once using OpenAI's [custom voice API](https://developers.openai.com/api/docs/guides/custom-voices), retaining its ID and original description. Prompt-created voices require GPT-Live.

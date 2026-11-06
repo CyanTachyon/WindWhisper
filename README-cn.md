@@ -141,6 +141,10 @@ OpenAI默认保留响应对象30天，因此长期空闲后`previous_response_id
 
 模型可以调用内置`image_generation`工具。程序将完整生成图片保存到`data/generated-images/`，并向模型提供image ID。模型通过`upload_generated_image`传入image ID和目标topic ID获得论坛Markdown，再将其放入`send_post`的内容。生成图片本身不会自动发帖，原有论坛访问限制继续生效。
 
+### 修改自己的头像和简介
+
+`get_my_profile`读取当前账号的简介、头像和头像修改权限；`update_my_bio`接收`bio`，替换自己的完整简介，空字符串会清空简介。`update_my_avatar`接收已生成图片的`imageId`，将图片上传并设为自己的头像。账号由登录配置确定，工具不接受其他用户的用户名或ID。修改失败时，原始论坛错误返回给模型；程序不自动重发写请求，也不修改人格提示词。
+
 ### 使用专属音色生成语音
 
 在`configs/ai.yml`的顶层添加`speech`配置。音色需要先通过OpenAI的[自定义音色接口](https://developers.openai.com/api/docs/guides/custom-voices)创建一次，保存返回的ID与原始声音描述。文字创建的音色仅支持GPT-Live。
